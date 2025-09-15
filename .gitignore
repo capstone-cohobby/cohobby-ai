@@ -1,0 +1,33 @@
+# Python 캐시/빌드
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+
+# 가상환경
+venv/
+.env
+.venv/
+env/
+
+# IDE/에디터
+.idea/
+.vscode/
+*.iml
+
+# Scrapy 캐시
+.scrapy/
+
+# 로그/결과물
+*.log
+logs/
+output/
+results/
+
+# 크롤링 데이터
+rentals.json
+
+# OS 파일
+.DS_Store
+Thumbs.db
