@@ -26,10 +26,11 @@ class DaangnRentalSpider(scrapy.Spider):
     }
 
     def __init__(self,
-                 query="대여",
+                 query="대여",  # 검색어
                  location_name="노량진동",
                  location_id="6088",
                  max_pages=5,
+                 title_keywords="대여|렌탈", # 제목 필수 키워드 (정규식 OR)
                  **kwargs):
         super().__init__(**kwargs)
         # 공백 제거(예: "대 여" → "대여")
@@ -38,6 +39,9 @@ class DaangnRentalSpider(scrapy.Spider):
         self.location_id = str(location_id)
         self.max_pages = int(max_pages)
         self.page = 1
+        
+        # 제목 필터 정규식 (공백 제거 후 검사)
+        self.title_re = re.compile(title_keywords)
 
         base = "https://www.daangn.com/kr/buy-sell/"
         qs = {
@@ -56,6 +60,10 @@ class DaangnRentalSpider(scrapy.Spider):
         if not text:
             return "1일"
         t = text.replace(" ", "")
+        
+        # (예외 처리) "8/30", "8/31" 같은 달/일 표기는 스킵
+        if re.search(r"\d+/\d+", t):
+            return "1일"
 
         m = re.search(r"(\d+)\s*박\s*(\d+)\s*일", t)   # 2박3일
         if m:
@@ -113,6 +121,89 @@ class DaangnRentalSpider(scrapy.Spider):
         q = dict(parse_qsl(pu.query, keep_blank_values=True))
         q["page"] = str(page)
         return f"{pu.scheme}://{pu.netloc}{pu.path}?{urlencode(q, safe='-')}"
+    
+    def _parse_deposit(self, text: str) -> str:
+        """
+        보증금/Deposit 금액 추출
+        - "보증금 1.5" → 15000
+        - "보증금 2"   → 20000
+        - "보증금 2만" → 20000
+        - "보증금 15000" → 15000 (그대로)
+        """
+        deposit_pattern = r"(보[증즈중좁줌좀]금)"
+        m = re.search(rf"{deposit_pattern}\s*[:：]?\s*([0-9]+(?:[.,][0-9]+)?)(만|천|원)?", text, re.I)
+        if m:
+            deposit = self._normalize_amount(m.group(2), m.group(3))
+        else:
+            deposit = "0"
+        return deposit
+    
+    def _parse_purchase_age(self, text: str) -> str:
+        """
+        구매시기/연식 추정
+        """
+        t = text.replace(" ", "")
+
+        # (1) '며칠 전', '며칠전에'
+        if re.search(r"며칠전", t):
+            return "며칠 전"
+
+        # (2) 'N일/주/개월/년 전'
+        m = re.search(r"(\d+)(일|주|개월|달|년)전", t)
+        if m:
+            return f"{m.group(1)}{m.group(2)} 전"
+
+        # (3) '구매한지 N일/주/개월/년'
+        m = re.search(r"(구매|사용)(한지)?(\d+)(일|주|개월|달|년)", t)
+        if m:
+            return f"{m.group(3)}{m.group(4)}"
+
+        # (4) '작년', '올해'
+        if "작년" in t:
+            return "작년"
+        if "올해" in t or "금년" in t:
+            return "올해"
+
+        # (5) '20XX년형/년식'
+        m = re.search(r"(20\d{2})년(형|식)?", t)
+        if m:
+            return f"{m.group(1)}년{m.group(2) or ''}"
+
+        # (6) 모호한 표현
+        if re.search(r"(얼마안|거의안|새것같)", t):
+            return "최근"
+
+        return ""
+    
+    def _parse_damage_policy(self, text: str) -> bool:
+        """
+        손실/파손/수리비 관련 문구 여부
+        """
+        return bool(re.search(r"(파손|분실|수리비|a/?s|실비|청구)", text, re.I))
+    
+    def _normalize_amount(self, number: str, unit: str) -> str:
+        """
+        '1.5만', '2천', '10000원' 같은 문자열을 정수 원 단위 금액으로 변환
+        """
+        if not number:
+            return None
+
+        try:
+            value = float(number.replace(",", "").replace(".", ""))  # 기본 숫자 처리
+        except ValueError:
+            return None
+
+        # 단위 처리
+        if unit:
+            unit = unit.strip()
+            if unit == "만":
+                value *= 10000
+            elif unit == "천":
+                value *= 1000
+            elif unit == "원":
+                pass  # 그대로
+        return str(int(value))
+
 
     # ---------- 리스트 파서 ----------
     def parse(self, response):
@@ -215,9 +306,34 @@ class DaangnRentalSpider(scrapy.Spider):
         rental_price = pick_first(meta_price, ld_price, price_text)
         post_link = pick_first(canonical, og_url, response.url)
         category = pick_first(ld_category, article_section, cat_guess)
+        
+        # 제목 필터: '대여/렌탈' 등 키워드 없으면 스킵
+        title_norm = (product_name or "").replace(" ", "")
+        if not self.title_re.search(title_norm):
+            self.logger.info(f"[SKIP] title does not match keywords: {product_name}")
+            return
 
         # 대여기간 추출 (기본 1일)
         rental_duration = self._parse_rental_duration(f"{product_name} {desc}")
+        
+        # item 추출 전에 카테고리 필터링
+        if category in ["티켓/교환권", "삽니다", "무료나눔"]:
+            self.logger.info(f"[SKIP] excluded category: {category}")
+            return
+        
+        # 가격이 없거나 0원일 때 → 본문에서 대여비/렌탈비 추출
+        if not rental_price or rental_price in ["0", "0원", "가격 없음"]:
+            m = re.search(r"(대여비|렌탈비|대여)\s*[:：]?\s*([0-9]+(?:[.,][0-9]+)?)(만|천|원)?", desc)
+            if m:
+                rental_price = self._normalize_amount(m.group(2), m.group(3))
+            else:
+                rental_price = "0"   
+        
+        
+        # 보증금, 구매 시기 추출
+        deposit = self._parse_deposit(desc)
+        purchase_age = self._parse_purchase_age(desc)
+        damage_policy = self._parse_damage_policy(desc)
 
         # 결과
         yield {
@@ -226,4 +342,7 @@ class DaangnRentalSpider(scrapy.Spider):
             "post_link": post_link,
             "category": category,
             "rental_duration": rental_duration or "1일",
+            "deposit": deposit or None,
+            "purchase_age": purchase_age or None,
+            "damage_policy": damage_policy,  # True/False
         }
