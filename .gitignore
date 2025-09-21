@@ -26,7 +26,7 @@ output/
 results/
 
 # 크롤링 데이터
-rentals.json
+*.json
 
 # OS 파일
 .DS_Store
