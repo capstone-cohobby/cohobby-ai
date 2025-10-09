@@ -1,10 +1,8 @@
-# /servers/mcp_datalookup/normalizer.py
 import re
 
-
 def parse_krw(text: str) -> int | None:
-    t = text.replace(",", "")
-    m = re.search(r"(\d{1,3}(?:,\d{3})+|\d+)\s*(만원|천원|원)?", text)
+    s = (text or "").replace(",", "")
+    m = re.search(r"(\d{1,3}(?:,\d{3})+|\d+)\s*(만원|천원|원)?", text or "")
     if not m:
         return None
     n = int(m.group(1).replace(",", ""))
@@ -14,7 +12,6 @@ def parse_krw(text: str) -> int | None:
     elif unit == "천원":
         n *= 1_000
     return n
-
 
 def extract_rental_price(title: str, body: str | None) -> int | None:
     text = f"{title}\n{body or ''}"

@@ -12,26 +12,38 @@ from src.mcp.servers.datalookup.utils.pricing_utils import iqr_filter, summarize
 mcp = FastMCP("data-lookup")
 
 def _normalize_record(raw: dict) -> dict:
-    """서버 내부 표준화 레코드 (dict 버전; 외부 스키마 없이 독립 동작)."""
-    title = raw.get("title", "")
-    body = raw.get("body", "")
-    ltype, sig = classify_listing(title, body)  # 대여/판매/불명 판정  :contentReference[oaicite:6]{index=6}
-    product_name, category = extract_product_and_category(title, body)  # 모델/카테고리  :contentReference[oaicite:7]{index=7}
-    price = extract_rental_price(title, body) if ltype == "rental" else None  # 대여가 추출  :contentReference[oaicite:8]{index=8}
+    """
+    서버 내부 표준화 레코드 (판단 없음: 증거/힌트만).
+    - 최종 카테고리/합리성 평가는 Agent(LLM)가 한다.
+    """
+    title: str = (raw.get("title") or "").strip()
+    body: str | None = (raw.get("body") or "").strip() or None
 
+    # 1) 룰 기반 listing 타입 + 신호
+    listing_type, signals = classify_listing(title, body)
+
+    # 2) 모델명/카테고리 힌트(맵 없어도 안전)
+    model_hint, category_hint = extract_product_and_category(title, body)
+
+    # 3) 대여가(있을 때만 추출)
+    rental_price = extract_rental_price(title, body) if listing_type == "rental" else None
+
+    # 4) 표준화 레코드(증거 중심)
     return {
-        "id": str(raw.get("id") or raw.get("url")),
+        "id": str(raw.get("id") or raw.get("url") or ""),
         "source": raw.get("source", "unknown"),
         "url": raw.get("url", ""),
         "title_raw": title,
-        "body_raw": body or None,
+        "body_raw": body,
         "scraped_at": raw.get("scraped_at"),
         "location": raw.get("location"),
-        "listing_type": ltype,              # "rental" | "sale" | "unknown"
-        "product_name": product_name,
-        "category": category,
-        "rental_price": price,              # int | None (KRW)
-        "signals": sig,                     # 힌트 플래그
+
+        "listing_type": listing_type,      # "rental" | "sale" | "unknown"
+        "model_hint": model_hint,          # 최종 결정 아님 (Agent에서 판단)
+        "category_hint": category_hint,    # 최종 결정 아님 (Agent에서 판단)
+        "rental_price": rental_price,      # int | None (KRW)
+
+        "signals": signals,                # 전처리 레벨 힌트 플래그
     }
 
 def _iter_normalized(items: Iterable[dict]) -> Iterator[dict]:
