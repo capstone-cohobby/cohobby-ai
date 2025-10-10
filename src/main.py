@@ -1,49 +1,57 @@
-from __future__ import annotations
+import os
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
-import argparse
-import asyncio
-import json
+# 네 프로젝트 스키마/체인 import
+from hosts.agent.schemas import AgentInput, DecisionOutput
+from hosts.agent.chains.judge import judge_once  # 이미 하이브리드 fallback 통합된 버전 기준
 
-from src.hosts.agent.chains.judge import judge_once 
-from src.hosts.agent.schemas import AgentInput, CacheContext
+# ─────────────────────────────────────────────────────────────
+# FastAPI App
+# ─────────────────────────────────────────────────────────────
+app = FastAPI(title="Cohobby AI Price Estimator", version="1.0.0")
 
+# CORS (필요 시 도메인 제한)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("CORS_ALLOW_ORIGINS", "*").split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--category", required=True)
-    p.add_argument("--product", required=True)
-    p.add_argument("--region", required=True)
-    p.add_argument("--cache-median", type=float, default=0.018)
-    p.add_argument("--cache-n", type=int, default=120)
-    p.add_argument("--cache-iqr", type=float, default=0.004)
-    p.add_argument("--cache-updated-at", default="2025-09-20")
-    p.add_argument("--p10", type=float, default=0.012)
-    p.add_argument("--p50", type=float, default=0.018)
-    p.add_argument("--p90", type=float, default=0.028)
-    return p.parse_args()
+# ─────────────────────────────────────────────────────────────
+# Health
+# ─────────────────────────────────────────────────────────────
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
-async def main():
-    a = parse_args()
-    cache = CacheContext(
-        median_ratio=a.cache_median,
-        n=a.cache_n,
-        iqr=a.cache_iqr,
-        updated_at=a.cache_updated_at,
-        p10=a.p10,
-        p50=a.p50,
-        p90=a.p90,
-    )
-    payload = AgentInput(
-        category=a.category,
-        product=a.product,
-        region=a.region,
-        cache=cache,
-    )
-    result = await judge_once(payload)
-    print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
-
-if __name__ == "__main__":
+# ─────────────────────────────────────────────────────────────
+# Price estimation endpoint
+# ─────────────────────────────────────────────────────────────
+@app.post("/api/estimate-price", response_model=DecisionOutput)
+async def estimate_price(payload: AgentInput):
+    """
+    사용자 입력(물품명/상태/구입시기 등)을 받아
+    judge pipeline(LLM self-confidence + Redis/Batch/MCP)을 수행하고
+    DecisionOutput을 반환.
+    """
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+        result = await judge_once(payload)
+        # pydantic 모델 그대로 반환 (FastAPI가 json 직렬화)
+        return result
+    except Exception as e:
+        # 로깅은 필요 시 Sentry/Loguru로 확장
+        raise HTTPException(status_code=500, detail=f"judge failed: {str(e)}")
+
+
+# ─────────────────────────────────────────────────────────────
+# Local run
+# ─────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    host = os.getenv("SERVER_HOST", "0.0.0.0")
+    port = int(os.getenv("SERVER_PORT", "8080"))
+    uvicorn.run("main:app", host=host, port=port, reload=os.getenv("RELOAD", "false") == "true")
+

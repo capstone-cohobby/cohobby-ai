@@ -1,35 +1,46 @@
-# hosts/agent/llm.py
 import os
+from typing import Optional
 
-if os.getenv("DISABLE_LLM", "0") in {"1", "true", "True"}:
-    # 테스트/임포트 전용 더미 객체
-    class _Dummy:
-        def bind_tools(self, *args, **kwargs):
-            return self
-        async def ainvoke(self, *a, **k):
-            raise RuntimeError("LLM disabled for import tests")
+from langchain_anthropic import ChatAnthropic
+from anthropic import Anthropic
+from dotenv import load_dotenv
+load_dotenv()
 
-    chat_claude = _Dummy()
 
-    def build_prompt(system_text: str):
-        class _P:
-            def partial(self, **kw): return self
-            def __or__(self, other): return self
-        return _P()
-else:
-    # 실제 LLM 연동(테스트에서는 꺼둠)
-    from langchain_anthropic import ChatAnthropic
+def _get(key: str, default: Optional[str] = None) -> str:
+    v = os.getenv(key, default)
+    if v is None or v == "":
+        raise RuntimeError(f"Missing env: {key}")
+    return v
 
-    from hosts.agent.config import settings
-    chat_claude = ChatAnthropic(
-        model=settings.model,
-        anthropic_api_key=settings.anthropic_api_key,
-        max_tokens=settings.max_output_tokens,
-        temperature=0.2,
-    )
-    from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate
-    def build_prompt(system_text: str):
-        return ChatPromptTemplate.from_messages([
-            SystemMessagePromptTemplate.from_template(system_text),
-            ("human", "{user_json}")
-        ])
+
+# ─────────────────────────────────────────────────────────────
+# LangChain용 Claude (에이전트의 '두뇌')
+# ─────────────────────────────────────────────────────────────
+# 사용처: judge.py, classifier.py 등에서 import 하여 사용
+ANTHROPIC_API_KEY = _get("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20240620")
+CLAUDE_TEMPERATURE = float(os.getenv("CLAUDE_TEMPERATURE", "0.2"))
+CLAUDE_MAX_OUTPUT_TOKENS = int(os.getenv("CLAUDE_MAX_OUTPUT_TOKENS", "1024"))
+REQUEST_TIMEOUT = int(os.getenv("LLM_REQUEST_TIMEOUT", "60"))  # sec
+
+# LangChain Chat Model 인스턴스 (tool 바인딩용)
+chat_claude = ChatAnthropic(
+    anthropic_api_key=ANTHROPIC_API_KEY,
+    model=ANTHROPIC_MODEL,
+    temperature=CLAUDE_TEMPERATURE,
+    max_tokens=CLAUDE_MAX_OUTPUT_TOKENS,
+)
+
+# ─────────────────────────────────────────────────────────────
+# Native Anthropic client (배치/세부 제어용)
+# ─────────────────────────────────────────────────────────────
+# 사용처: judgement_batch.py 등 배치/로우 API 접근이 필요한 곳
+anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
+
+
+__all__ = [
+    "chat_claude",
+    "anthropic_client",
+]
+
