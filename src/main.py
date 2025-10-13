@@ -1,5 +1,6 @@
 import os
 import uvicorn
+import logging
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -7,6 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from hosts.agent.schemas import AgentInput, DecisionOutput
 from hosts.agent.chains.judge import judge_once  # 이미 하이브리드 fallback 통합된 버전 기준
 
+# 로깅 기본 설정 (애플리케이션 시작 시 1회)
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 # ─────────────────────────────────────────────────────────────
 # FastAPI App
 # ─────────────────────────────────────────────────────────────
@@ -43,6 +47,7 @@ async def estimate_price(payload: AgentInput):
         # pydantic 모델 그대로 반환 (FastAPI가 json 직렬화)
         return result
     except Exception as e:
+        logging.error(f"Judge pipeline failed for payload: {payload.model_dump()}", exc_info=True)
         # 로깅은 필요 시 Sentry/Loguru로 확장
         raise HTTPException(status_code=500, detail=f"judge failed: {str(e)}")
 

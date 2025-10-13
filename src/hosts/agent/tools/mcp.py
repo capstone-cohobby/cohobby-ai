@@ -1,77 +1,139 @@
-from __future__ import annotations
-import os
-import requests
-from typing import List, Dict, Any, Optional
+import os, requests
+from typing import Any, Dict, List
 from pydantic import BaseModel, Field
 from langchain_core.tools import StructuredTool
+from typing import Optional
+
 
 # ─────────────────────────────────────────────────────────────
-# MCP HTTP Client (간단 JSON RPC 스타일)
+# HTTP 모드(FastMCP) 전용 세션/호출 유틸 (SSE 헤더 제거 + 엔드포인트 분리)
 # ─────────────────────────────────────────────────────────────
-MCP_DATA_LOOKUP_URL = os.getenv("MCP_DATA_LOOKUP_URL", "http://localhost:8765")
+import requests
+
+MCP_BASE_URL = os.getenv("MCP_DATA_LOOKUP_URL", "http://localhost:8765/").rstrip("/")  # 예: http://localhost:8765
+MCP_HTTP_TIMEOUT = float(os.getenv("MCP_HTTP_TIMEOUT", "30"))
+
+_session = requests.Session()
+_mcp_session_id: Optional[str] = None
+
+def _ensure_mcp_session():
+    """tools/list로 핸드셰이크하고 mcp-session-id를 확보한다 (HTTP 모드)."""
+    global _mcp_session_id
+    if _mcp_session_id:
+        return
+
+    payload = {"jsonrpc": "2.0", "id": "hello", "method": "tools/list", "params": {}}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",               
+        "mcp-protocol-version": "2025-06-18",
+    }
+    url = f"{MCP_BASE_URL}/"                
+    r = _session.post(url, json=payload, headers=headers, timeout=MCP_HTTP_TIMEOUT)
+    
+    print("--- [MCP 세션 요청 결과] ---")
+    print(f"URL: {url}")
+    print(f"Status Code: {r.status_code}")
+    print("Response Headers:")
+    for key, value in r.headers.items():
+        print(f"  {key}: {value}")
+    print("Response Body:")
+    print(r.text)
+    print("--- [결과 끝] ---")
+    
+    # 에러 디버깅 보조
+    if r.status_code >= 400:
+        raise RuntimeError(f"[MCP] tools/list failed {r.status_code}: {r.text[:500]}")
+    sid = r.headers.get("mcp-session-id")
+    if not sid:
+        # 일부 구현체가 body에 줄 수 있으니 여유 파싱
+        try:
+            body = r.json() or {}
+            sid = (
+                body.get("result", {}).get("sessionId")
+                or body.get("result", {}).get("session_id")
+                or body.get("sessionId")
+            )
+        except Exception:
+            sid = None
+    if not sid:
+        raise RuntimeError("MCP: server did not return a session id (header or body).")
+
+    _mcp_session_id = sid
+    # print(f"[MCP] session established: {sid}")
 
 def _call_mcp(tool_name: str, params: Dict[str, Any]) -> Any:
-    """
-    FastMCP 서버의 특정 tool을 호출한다.
-    서버에서 tool을 @mcp.tool()로 등록했다면
-    POST {base}/tools/<name> 로 JSON 요청을 받도록 설정했을 것.
-    필요 시 엔드포인트는 서버 구현에 맞춰 변경.
-    """
-    url = f"{MCP_DATA_LOOKUP_URL}/tools/{tool_name}"
-    r = requests.post(url, json=params, timeout=int(os.getenv("MCP_HTTP_TIMEOUT", "60")))
-    r.raise_for_status()
-    return r.json()
+    """HTTP 모드로 tools/call 호출."""
+    _ensure_mcp_session()
 
-# ─────────────────────────────────────────────────────────────
-# Pydantic Arg Schemas
-# ─────────────────────────────────────────────────────────────
-class FetchAndNormalizeArgs(BaseModel):
-    path: str = Field(..., description="로컬 JSONL 경로 (예: ./data/daangn.jsonl)")
-    limit: int = Field(500, ge=1, le=5000, description="최대 읽기 개수")
+    payload = {
+        "jsonrpc": "2.0",
+        "id": f"call_{tool_name}",
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": params},
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "mcp-protocol-version": "2025-06-18",
+        "mcp-session-id": _mcp_session_id,
+    }
+    url=f"{MCP_BASE_URL}/"
+    r= _session.post(url, json=payload, headers=headers, timeout=MCP_HTTP_TIMEOUT)
+    print("[DBG] base =", MCP_BASE_URL)
+    print("[DBG] url  =", f"{MCP_BASE_URL}/")
+    print("[DBG] headers =", headers)
+    
+# ---- S3용 툴들 ----
+class FetchCoreFromS3Args(BaseModel):
+    bucket: str = Field(..., description="S3 버킷")
+    key: str = Field(..., description="S3 키 (예: out.jsonl 또는 .jsonl.gz)")
+    limit: int = Field(500, ge=1, le=5000)
 
-class FilterByCategoryHintArgs(BaseModel):
-    records: List[Dict[str, Any]] = Field(..., description="fetch_and_normalize로 얻은 표준화 레코드 리스트")
-    category: str = Field(..., description="필터할 카테고리 키워드 (예: '캠핑', '전자기기')")
-    limit: int = Field(100, ge=1, le=5000, description="최대 반환 개수")
+def _extract_records(rpc_json):
+    """
+    JSON-RPC 응답에서 실제 레코드 리스트를 안전하게 뽑아낸다.
+    서버 구현 차이를 흡수하기 위해 여러 키를 시도한다.
+    """
+    if isinstance(rpc_json, list):
+        return rpc_json
+
+    res = (rpc_json or {}).get("result")
+    if isinstance(res, list):
+        return res
+    if isinstance(res, dict):
+        for k in ("records", "items", "content", "data"):
+            v = res.get(k)
+            if isinstance(v, list):
+                return v
+        # 결과가 단일 객체면 리스트로 감싸서 반환
+        if isinstance(res, dict) and res:
+            return [res]
+
+    return []
+
+def tool_fetch_core_from_s3(bucket: str, key: str, limit: int = 50):
+    payload = {"bucket": bucket, "key": key, "limit": limit}
+    rpc = _call_mcp("fetch_core_from_s3", payload)   # ← JSON-RPC 전체
+    return _extract_records(rpc)                      # ← 리스트만 리턴
 
 class SummarizeArgs(BaseModel):
-    records: List[Dict[str, Any]] = Field(..., description="표준화 레코드 리스트")
+    records: List[Dict[str, Any]]
 
-# ─────────────────────────────────────────────────────────────
-# 실제 호출 함수 (LangChain Tool에 바인딩될 함수)
-# ─────────────────────────────────────────────────────────────
-def tool_fetch_and_normalize(path: str, limit: int = 500) -> Any:
-    return _call_mcp("fetch_and_normalize", {"path": path, "limit": limit})
-
-def tool_filter_by_category_hint(records: List[Dict[str, Any]], category: str, limit: int = 100) -> Any:
-    return _call_mcp("filter_by_category_hint", {"records": records, "category": category, "limit": limit})
-
-def tool_summarize_rental_prices(records: List[Dict[str, Any]]) -> Any:
+def tool_summarize_rental_prices(records: List[Dict[str, Any]]):
     return _call_mcp("summarize_rental_prices", {"records": records})
 
-# ─────────────────────────────────────────────────────────────
-# LangChain Tool 등록
-# ─────────────────────────────────────────────────────────────
 TOOLS = [
     StructuredTool.from_function(
-        name="fetch_and_normalize",
-        description="로컬 JSONL을 읽어 표준화 레코드를 만든다. (대여/판매 구분, category_hint, rental_price 등 힌트 포함)",
-        func=tool_fetch_and_normalize,
-        args_schema=FetchAndNormalizeArgs,
-        return_direct=False,
-    ),
-    StructuredTool.from_function(
-        name="filter_by_category_hint",
-        description="표준화 레코드에서 category_hint/raw.category로 카테고리 필터링",
-        func=tool_filter_by_category_hint,
-        args_schema=FilterByCategoryHintArgs,
-        return_direct=False,
+        name="fetch_core_from_s3",
+        description="S3 JSONL(.gz)에서 코어 필드만 가져오기",
+        func=tool_fetch_core_from_s3,
+        args_schema=FetchCoreFromS3Args,
     ),
     StructuredTool.from_function(
         name="summarize_rental_prices",
-        description="records에서 rental_price들을 IQR 필터링 후 요약 통계를 반환",
+        description="records의 rental_price를 IQR로 요약 통계",
         func=tool_summarize_rental_prices,
         args_schema=SummarizeArgs,
-        return_direct=False,
     ),
 ]

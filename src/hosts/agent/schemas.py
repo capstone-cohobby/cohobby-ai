@@ -84,3 +84,33 @@ class DecisionOutput(BaseModel):
         self.evidence_source = source
         if self.confidence < 0.8:
             self.boost_confidence(0.15)
+class AgentInput(BaseModel):
+    """
+    Agent의 판단을 위해 입력되는 데이터의 스키마입니다.
+    """
+    name: str = Field(
+        ...,
+        description="상품 또는 게시글의 이름/제목입니다. 판단의 가장 핵심적인 정보입니다."
+    )
+    
+    description: Optional[str] = Field(
+        None, 
+        description="상품 또는 게시글의 상세 설명입니다. 이름만으로 부족한 정보를 보충합니다."
+    )
+    
+    category: Optional[str] = Field(
+        None, 
+        description="상품의 카테고리 정보입니다. (예: 캠핑용품, 전자기기)"
+    )
+    
+    # --- 아래 필드들은 2차 보강 판단 시 시스템에 의해 주입됩니다 ---
+    
+    evidence_summary: Optional[str] = Field(
+        None,
+        description="1차 판단에서 정보가 불충분할 경우, 2차 판단을 돕기 위해 외부에서 가져온 근거 정보 요약입니다."
+    )
+    
+    evidence_source: Optional[str] = Field(
+        None,
+        description="근거 정보의 출처를 나타냅니다. (예: 'redis', 'batch')"
+    )

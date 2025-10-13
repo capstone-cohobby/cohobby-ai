@@ -12,7 +12,7 @@ def classify_category(name: str, condition: str, bought_at: str):
     예: '캠핑용품', '전자기기', '가전제품', '의류', '스포츠장비' 등.
     """
     response = client.messages.create(
-        model="claude-3-5-sonnet-20240620",
+        model=os.getenv("ANTHROPIC_MODEL"),
         max_tokens=30,
         messages=[{"role": "user", "content": prompt}],
     )

@@ -1,0 +1,27 @@
+name: cohobby-datalookup
+version: 1.0.0
+description: Rental data lookup MCP server
+
+# 인증 완전 비활성화
+authentication:
+  type: none
+  required: false
+
+# 공개 접근 허용
+access:
+  public: true
+
+# 환경 변수
+environment:
+  AWS_REGION: ap-northeast-2
+
+# Python 버전
+runtime:
+  python: "3.12"
+
+# 의존성
+dependencies:
+  - boto3
+  - fastmcp
+  - starlette
+  - uvicorn

@@ -1,58 +1,57 @@
-import os, requests, json
-from src.cache.redis_client import set_cached
-from src.mcp.servers.datalookup.server import read_jsonl_filtered
+# batch_executor.py (MCP 서버의 툴을 호출하는 역할만 수행)
 
-API_KEY = os.getenv("ANTHROPIC_API_KEY")
+import os
+import json
+from cohobby_mcp.client.mcp_client_http import MCPHttpClient
+from cache.redis_client import set_cached
 
-def run_batch_judgment(category: str):
-    print(f"⚙️ Batch: {category} 품목 평가 중...")
+# --- MCP 클라이언트 설정 (기존과 동일) ---
+MCP_URL = os.getenv("MCP_URL")
+mcp = MCPHttpClient(MCP_URL, timeout=60)
+BUCKET = os.getenv("AWS_S3_BUCKET")
+KEY = os.getenv("S3_INPUT_KEY", "out.jsonl")
 
-    data = read_jsonl_filtered(
-        bucket="cohobby-crawler",
-        key="crawler-results/2025-10-08/daangn_1759912633.json",
-        category=category,
-        limit=50
-    )
+def run_batch_judgment(category: str) -> dict:
+    """
+    Python Orchestrator(judge.py)의 요청을 받아,
+    FastMCP 서버의 전문가 툴을 호출하고 그 결과를 반환합니다.
+    """
+    print(f"🚀 [Batch Executor] '{category}' 카테고리 데이터 요약을 MCP 서버에 요청합니다...")
 
-    requests_list = []
-    for i, item in enumerate(data):
-        prompt = f"""
-        품목: {item.get("title")}
-        가격: {item.get("price")}
-        위치: {item.get("location")}
-        날짜: {item.get("created_at")}
+    # 🔴 S3 조회, Claude Batch API 호출 등 복잡한 로직 모두 제거
 
-        이 게시글의 대여가가 시장 평균 대비 합리적인지,
-        0~1 신뢰도 점수와 간단한 이유를 출력해줘.
-        """
-        requests_list.append({
-            "custom_id": f"{category}_{i}",
-            "params": {
-                "model": "claude-3-5-sonnet-20240620",
-                "max_tokens": 300,
-                "messages": [{"role": "user", "content": prompt}]
-            }
-        })
+    try:
+        # 🟢 FastMCP 서버에 있는 '전문가 툴'을 호출합니다.
+        #    서버의 실제 툴 이름과 파라미터에 맞게 수정하세요.
+        #    예시: summarize_rental_prices, process_s3_data_and_summarize 등
+        tool_name = "fetch_core_from_s3" # ◀◀◀ 서버에 구현된 툴 이름
+        arguments = {
+            "bucket": BUCKET,
+            "key": KEY,
+            "limit": 500
+        }
+        
+        print(f"📞 [Batch Executor] Calling MCP Tool: '{tool_name}' with args: {arguments}")
+        
+        # MCP 클라이언트를 통해 툴 호출
+        resp = mcp.tools_call(tool_name, arguments)
 
-    res = requests.post(
-        "https://api.anthropic.com/v1/messages/batches",
-        headers={
-            "x-api-key": API_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={"requests": requests_list}
-    )
-    batch = res.json()
+        # 🟢 MCP 서버가 반환한 '정제된 값'을 추출합니다.
+        #    (응답 구조에 따라 이 부분은 달라질 수 있습니다)
+        summary_result = (resp.get("result", {}).get("content") or [{}])[0].get("value")
+        
+        if not summary_result:
+            print(f"⚠️ [Batch Executor] MCP 서버가 '{category}'에 대한 유효한 결과를 반환하지 않았습니다.")
+            return {"error": f"No valid summary for {category}"}
 
-    result_summary = {
-        "category": category,
-        "avg_rent_price": None,  # 나중에 계산 가능
-        "batch_id": batch["id"],
-        "confidence": 0.8,
-        "updated_at": "auto",
-    }
+        print(f"✅ [Batch Executor] MCP 서버로부터 정제된 값을 성공적으로 수신했습니다.")
+        
+        # Redis에 캐싱 (기존 로직 유지)
+        set_cached(category, summary_result)
+        
+        return summary_result
 
-    set_cached(category, result_summary)
-    print(f"✅ Redis 저장 완료: {category}")
-    return result_summary
+    except Exception as e:
+        print(f"❌ [Batch Executor] MCP 툴 호출 중 에러 발생: {e}")
+        # 에러 상황을 상위 호출자(judge.py)에게 전파
+        raise e

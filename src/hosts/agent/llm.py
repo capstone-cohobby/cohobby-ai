@@ -1,46 +1,45 @@
-import os
-from typing import Optional
 
+# llm.py
 from langchain_anthropic import ChatAnthropic
 from anthropic import Anthropic
-from dotenv import load_dotenv
-load_dotenv()
+from .config import settings
 
-
-def _get(key: str, default: Optional[str] = None) -> str:
-    v = os.getenv(key, default)
-    if v is None or v == "":
-        raise RuntimeError(f"Missing env: {key}")
-    return v
-
-
-# ─────────────────────────────────────────────────────────────
-# LangChain용 Claude (에이전트의 '두뇌')
-# ─────────────────────────────────────────────────────────────
-# 사용처: judge.py, classifier.py 등에서 import 하여 사용
-ANTHROPIC_API_KEY = _get("ANTHROPIC_API_KEY")
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20240620")
-CLAUDE_TEMPERATURE = float(os.getenv("CLAUDE_TEMPERATURE", "0.2"))
-CLAUDE_MAX_OUTPUT_TOKENS = int(os.getenv("CLAUDE_MAX_OUTPUT_TOKENS", "1024"))
-REQUEST_TIMEOUT = int(os.getenv("LLM_REQUEST_TIMEOUT", "60"))  # sec
-
-# LangChain Chat Model 인스턴스 (tool 바인딩용)
 chat_claude = ChatAnthropic(
-    anthropic_api_key=ANTHROPIC_API_KEY,
-    model=ANTHROPIC_MODEL,
-    temperature=CLAUDE_TEMPERATURE,
-    max_tokens=CLAUDE_MAX_OUTPUT_TOKENS,
+    anthropic_api_key=settings.anthropic_api_key,
+    model=settings.anthropic_model,
+    temperature=settings.temperature,
+    max_tokens=settings.max_output_tokens,
+    timeout=settings.llm_request_timeout,
 )
 
-# ─────────────────────────────────────────────────────────────
-# Native Anthropic client (배치/세부 제어용)
-# ─────────────────────────────────────────────────────────────
-# 사용처: judgement_batch.py 등 배치/로우 API 접근이 필요한 곳
-anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
+anthropic_client = Anthropic(
+    api_key=settings.anthropic_api_key,
+    timeout=settings.llm_request_timeout,
+)
 
+# ✅ Structured Chat agent로 직접 구성
+from hosts.agent.tools.mcp import TOOLS
+from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain.prompts import ChatPromptTemplate
 
-__all__ = [
-    "chat_claude",
-    "anthropic_client",
-]
+def make_agent(verbose: bool = True) -> AgentExecutor:
+    """
+    최신 Tool Calling 방식의 Anthropic 에이전트를 생성합니다.
+    """
+    # 1. 최신 방식에 맞는 간단한 프롬프트 정의
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", "You are a helpful assistant that uses tools to answer questions."),
+            ("human", "{input}"),
+            ("placeholder", "{agent_scratchpad}"),
+        ]
+    )
+    
+    # 2. create_tool_calling_agent 사용 (가장 중요한 변경점)
+    agent = create_tool_calling_agent(chat_claude, TOOLS, prompt)
+    
+    # 3. AgentExecutor 생성 (이 부분은 동일)
+    return AgentExecutor(agent=agent, tools=TOOLS, verbose=verbose)
+
+__all__ = ["chat_claude", "anthropic_client", "make_agent"]
 

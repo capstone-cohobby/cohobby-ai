@@ -26,12 +26,15 @@ numpy = "^2.1.0"
 
 # --- MCP 서버 (FastAPI 권장) ---
 fastapi = "^0.115.0"
-uvicorn = { version = "^0.30.0", extras = ["standard"] }
+uvicorn = ">=0.31.1"
 
 # --- 기타 유틸 (있으면 사용) ---
-scrapy = "^2.13.3"      # 선택
 fastmcp = "^2.12.4"     # 사용 중이라면 유지
-anthropic = "0.69"
+boto3   = "^1.35"
+botocore = "^1.35"
+redis = "^6.4.0"
+mcp = "^1.17.0"
+websockets = "^14"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.6.8"
@@ -39,12 +42,11 @@ black = "^24.8.0"
 mypy = "^1.10.0"
 pytest = "^8.2.0"
 pytest-asyncio = "^0.23.0"
+zstandard = "==0.25.0"
 
 [tool.poetry.scripts]
-# MCP 서버 엔트리 (추천: 우리가 정의한 경로에 맞춰 조정)
-mcp-datalookup = "src.mcp.servers.datalookup.server:main"
-mcp-pricing    = "mcp.servers.pricing.app:cli"
-mcp-events     = "mcp.servers.events.app:cli"
+# MCP 서버 엔트리 
+mcp-datalookup = "src.cohobby_mcp.servers.datalookup.server:main"
 
 # Agent 실행 엔트리
 cohobby-agent  = "main:cli"   # src/main.py 안의 cli()
