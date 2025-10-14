@@ -5,7 +5,7 @@ from json import JSONDecodeError
 from typing import List, Dict, Any, Optional
 import boto3
 from botocore.config import Config
-print("[s3_reader] module loaded", flush=True)
+
 _s3 = boto3.client("s3", config=Config(signature_version="s3v4"))
 
 def _maybe_decompress(b: bytes) -> bytes:
