@@ -28,13 +28,17 @@ def _to_json_str(obj: Any) -> str:
 
 async def _ainvoke_with_retry(chain, user_json: str, max_retries: int = 2):
     last_err = None
-    for _ in range(max_retries + 1):
+    for attempt in range(max_retries + 1):
         try:
-            return await chain.ainvoke({"user_json": user_json})
+            print(f"[JUDGE] LLM call attempt={attempt} payload_len={len(user_json)}")
+            res = await chain.ainvoke({"user_json": user_json})
+            print(f"[JUDGE] LLM call success on attempt={attempt}")
+            return res
         except Exception as e:
             last_err = e
-    if last_err:
-        raise last_err
+            print(f"[JUDGE][ERROR] attempt={attempt} failed: {type(e).__name__}: {e}")
+    print("[JUDGE][FATAL] All retries exhausted. Raising last error.")
+    raise last_err
 
 
 # ─────────────────────────────────────────────────────────────

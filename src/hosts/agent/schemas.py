@@ -42,7 +42,6 @@ class BatchSummaryOutput(BaseModel):
     reasoning: str
     price: PriceEstimate
     signals: Optional[Dict[str, Any]] = None   # n_total, n_eligible, flags 등
-    examples: Optional[List[Dict[str, Any]]] = None  # {title,rental_price_per_day,url} 3~5개
     created_at: Optional[str] = None
 
 
