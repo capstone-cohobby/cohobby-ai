@@ -1,57 +1,109 @@
-# batch_executor.py (MCP 서버의 툴을 호출하는 역할만 수행)
+from __future__ import annotations
 
-import os
-import json
-from cohobby_mcp.client.mcp_client_http import MCPHttpClient
-from cache.redis_client import set_cached
+import json, re, os
+from typing import Any, Optional
 
-# --- MCP 클라이언트 설정 (기존과 동일) ---
-MCP_URL = os.getenv("MCP_URL")
-mcp = MCPHttpClient(MCP_URL, timeout=60)
+from cache.redis_client import set_cached, get_cached
+from hosts.agent.llm import chat_claude, TOOLS
+from langchain_core.prompts import ChatPromptTemplate
+from hosts.agent.prompts.prompt import SYSTEM_PROMPT_BATCH
+from hosts.agent.tools.mcp_tools import fetch_core_from_s3_tool  # MCP 툴 (S3→records)
+
 BUCKET = os.getenv("AWS_S3_BUCKET")
-KEY = os.getenv("S3_INPUT_KEY", "out.jsonl")
+KEY    = os.getenv("S3_INPUT_KEY", "out.jsonl")
 
-def run_batch_judgment(category: str) -> dict:
-    """
-    Python Orchestrator(judge.py)의 요청을 받아,
-    FastMCP 서버의 전문가 툴을 호출하고 그 결과를 반환합니다.
-    """
-    print(f"🚀 [Batch Executor] '{category}' 카테고리 데이터 요약을 MCP 서버에 요청합니다...")
+# LLM 체인
+_batch_prompt = ChatPromptTemplate.from_messages([
+    ("system", SYSTEM_PROMPT_BATCH),
+    ("human", "{{user_json}}")
+])
+_llm_batch = chat_claude.bind_tools(TOOLS, max_tokens=1200)
+_chain_batch = _batch_prompt | _llm_batch
 
-    # 🔴 S3 조회, Claude Batch API 호출 등 복잡한 로직 모두 제거
 
+async def _ainvoke_with_retry(chain, user_json: str, max_retries: int = 2):
+    last = None
+    for _ in range(max_retries + 1):
+        try:
+            return await chain.ainvoke({"user_json": user_json})
+        except Exception as e:
+            last = e
+    if last:
+        raise last
+
+
+def _json_from_content(content: Any) -> str:
+    # Anthropic output_json 우선
+    if isinstance(content, list):
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "output_json" and "output_json" in b:
+                return json.dumps(b["output_json"], ensure_ascii=False)
+    # 텍스트 합침
+    if isinstance(content, list):
+        text = "".join((b.get("text", "") or "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    else:
+        text = str(content or "")
+    # ```json 코드펜스
+    for m in re.finditer(r"```(?:json)?\s*([\s\S]*?)\s*```", text):
+        cand = (m.group(1) or "").strip()
+        try:
+            json.loads(cand); return cand
+        except Exception:
+            pass
+    # 중괄호 스캔
+    s = text.strip()
+    for st in [m.start() for m in re.finditer(r"\{", s)]:
+        for ed in range(len(s), st + 1, -1):
+            frag = s[st:ed].strip()
+            if not frag.endswith("}"): continue
+            try:
+                json.loads(frag); return frag
+            except Exception:
+                continue
+    raise ValueError("No valid JSON found in content")
+
+
+def _batch_key(category: str, signature: str) -> str:
+    return f"batch:{category}:{signature}"
+
+
+async def run_batch_and_cache(name: str, category: str, signature: str) -> Optional[dict]:
+    """Redis miss 시 S3→LLM 배치 판단을 수행하고 Redis에 저장."""
+    # 0) 캐시 확인
     try:
-        # 🟢 FastMCP 서버에 있는 '전문가 툴'을 호출합니다.
-        #    서버의 실제 툴 이름과 파라미터에 맞게 수정하세요.
-        #    예시: summarize_rental_prices, process_s3_data_and_summarize 등
-        tool_name = "fetch_core_from_s3" # ◀◀◀ 서버에 구현된 툴 이름
-        arguments = {
-            "bucket": BUCKET,
-            "key": KEY,
-            "limit": 500
-        }
-        
-        print(f"📞 [Batch Executor] Calling MCP Tool: '{tool_name}' with args: {arguments}")
-        
-        # MCP 클라이언트를 통해 툴 호출
-        resp = mcp.tools_call(tool_name, arguments)
+        cached = get_cached(_batch_key(category, signature))
+        if isinstance(cached, dict) and cached:
+            return cached
+        if isinstance(cached, str) and cached.strip():
+            return json.loads(cached)
+    except Exception:
+        # Redis 장애시에도 계속 진행(근거 수집 시도)
+        pass
 
-        # 🟢 MCP 서버가 반환한 '정제된 값'을 추출합니다.
-        #    (응답 구조에 따라 이 부분은 달라질 수 있습니다)
-        summary_result = (resp.get("result", {}).get("content") or [{}])[0].get("value")
-        
-        if not summary_result:
-            print(f"⚠️ [Batch Executor] MCP 서버가 '{category}'에 대한 유효한 결과를 반환하지 않았습니다.")
-            return {"error": f"No valid summary for {category}"}
-
-        print(f"✅ [Batch Executor] MCP 서버로부터 정제된 값을 성공적으로 수신했습니다.")
-        
-        # Redis에 캐싱 (기존 로직 유지)
-        set_cached(category, summary_result)
-        
-        return summary_result
-
+    # 1) MCP로 S3 records 수집
+    try:
+        records = fetch_core_from_s3_tool.run({"bucket": BUCKET, "key": KEY, "limit": 500})
     except Exception as e:
-        print(f"❌ [Batch Executor] MCP 툴 호출 중 에러 발생: {e}")
-        # 에러 상황을 상위 호출자(judge.py)에게 전파
-        raise e
+        print(f"[MCP] fetch_core_from_s3 failed: {e}")
+        return None
+    if not records:
+        print(f"[MCP] no records for bucket={BUCKET} key={KEY}")
+        return None
+
+    # 2) LLM 배치 판단
+    user_obj = {"name": name, "category": category, "raw": records}
+    raw = await _ainvoke_with_retry(_chain_batch, json.dumps(user_obj, ensure_ascii=False))
+    content = getattr(raw, "content", None)
+    try:
+        s = _json_from_content(content)
+        analysis = json.loads(s)
+    except Exception as e:
+        print(f"[Batch] JSON parse failed: {e}")
+        return None
+
+    # 3) Redis 저장 (가능할 때만)
+    try:
+        set_cached(_batch_key(category, signature), analysis)
+    except Exception:
+        pass
+    return analysis

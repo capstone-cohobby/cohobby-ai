@@ -2,14 +2,13 @@
 from typing import Any, Dict, Optional, List
 from pydantic import BaseModel, Field
 from langchain.tools import StructuredTool
-from mcp_client_http import MCPHttpClient
+from cohobby_mcp.client.mcp_client_http import MCPHttpClient
 
 # --- MCP client 인스턴스 (환경변수/설정에서 주입) ---
 # 예) MCP_URL=https://server.smithery.ai/...  SMITHERY_API_KEY=...
 import os
 MCP_URL = os.getenv("MCP_URL", "http://127.0.0.1:8765")
-MCP_API_KEY = os.getenv("SMITHERY_API_KEY")
-mcp = MCPHttpClient(MCP_URL, MCP_API_KEY)
+mcp = MCPHttpClient(MCP_URL)
 
 # (선택) 부팅 시 1회 초기화
 try:
