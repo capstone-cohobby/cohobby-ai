@@ -34,30 +34,22 @@ def _unwrap_result(result: Dict[str, Any]) -> Any:
 # -----------------------------------------------------------
 def get_price_summary_from_s3(bucket: str, key: str, limit: int = 500) -> Dict[str, Any]:
     """
-    S3에서 데이터를 가져와 정규화한 뒤, 가격 통계를 요약하여 반환하는 통합 함수.
+    LLM 배치용 경량 데이터: category_hint, model_hint, price만 반환
     """
-    print(f"Executing combo-tool: get_price_summary_from_s3 (bucket={bucket}, key={key})")
+    print(f"Executing: get_price_summary_from_s3 (bucket={bucket}, key={key})")
     
-    # 1단계: S3에서 데이터 가져오기 및 정규화
-    print(" -> Step 1: Fetching and normalizing records from S3...")
-    normalized_records_result = mcp.tools_call("fetch_and_normalize_from_s3", {
+    # ★ 새로운 경량 도구 호출
+    result = mcp.tools_call("fetch_category_summary_from_s3", {
         "bucket": bucket, "key": key, "limit": limit
     })
-    records = _unwrap_result(normalized_records_result)
+    records = _unwrap_result(result)
     
     if not records or isinstance(records, dict) and "error" in records:
-        print(f" -> Step 1 Failed. Result: {records}")
-        return {"error": "Failed to fetch or no records found.", "details": records}
+        print(f" -> Failed. Result: {records}")
+        return {"error": "Failed to fetch", "details": records}
     
-    print(f" -> Step 1 Success. Fetched {len(records)} records.")
-    
-    # 2단계: 가져온 데이터로 가격 통계 요약
-    print(" -> Step 2: Summarizing rental prices...")
-    summary_result = mcp.tools_call("summarize_rental_prices", {"records": records})
-    summary = _unwrap_result(summary_result)
-    print(f" -> Step 2 Success. Summary generated.")
-    
-    return summary
+    print(f" -> Success. Fetched {len(records)} lightweight records.")
+    return {"records": records, "count": len(records)}
 
 # -----------------------------------------------------------
 # 2. 새로운 통합 함수의 입력 스키마를 정의합니다.
@@ -77,6 +69,7 @@ get_price_summary_from_s3_tool = StructuredTool.from_function(
     args_schema=GetPriceSummaryInput,
     func=get_price_summary_from_s3,
 )
+
 
 # -----------------------------------------------------------
 # 4. AI 에이전트에게는 이 강력한 통합 툴 하나만 노출합니다.

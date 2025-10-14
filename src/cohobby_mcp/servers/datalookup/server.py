@@ -159,10 +159,30 @@ def summarize_rental_prices(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     summary["count_before_iqr"] = len(prices)
     return summary
 
+def fetch_category_summary_from_s3(bucket: str, key: str, limit: int = 500) -> List[Dict[str, Any]]:
+    """LLM 배치 분석용 경량 데이터: category_hint, model_hint, price만"""
+    records = fetch_and_normalize_from_s3(bucket=bucket, key=key, limit=limit)
+    
+    lightweight = []
+    for r in records:
+        if not r or "error" in r:
+            continue
+        item = {
+            "id": r.get("id"),
+            "category_hint": r.get("category_hint"),
+            "model_hint": r.get("model_hint"),
+            "listing_type": r.get("listing_type"),
+        }
+        if r.get("rental_price"):
+            item["rental_price"] = r["rental_price"]
+        lightweight.append(item)
+    
+    return lightweight
+
 fetch_and_normalize_from_s3_tool = mcp.tool()(fetch_and_normalize_from_s3)
 fetch_core_from_s3_tool            = mcp.tool()(fetch_core_from_s3)
 summarize_rental_prices_tool       = mcp.tool()(summarize_rental_prices)
-
+fetch_category_summary_from_s3_tool = mcp.tool()(fetch_category_summary_from_s3)
 # --------- HTTP JSON-RPC plumbing (수동 구현) ---------
 
 # well-known (Smithery가 참고)
@@ -222,6 +242,38 @@ def _tools_schema() -> Dict[str, Any]:
                     "required": ["records"]
                 },
             },
+            {
+                "name": "fetch_category_summary_from_s3",
+                "description": "경량 데이터: category_hint, model_hint, listing_type, rental_price만 반환",
+                "inputSchema": {
+                "type": "object",
+                "properties": {
+                "bucket": {"type": "string", "description": "S3 bucket name"},
+                "key": {"type": "string", "description": "S3 key (file path)"},
+                "limit": {"type": "integer", "description": "Max records (default 500)"}
+            },
+                "required": ["bucket", "key"]
+            },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {
+                    "records": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "category_hint": {"type": ["string", "null"]},
+                            "model_hint": {"type": ["string", "null"]},
+                            "listing_type": {"type": "string"},
+                            "rental_price": {"type": ["integer", "null"]}
+                    }
+                    }
+                },
+                "count": {"type": "integer"}
+        }
+    }
+}
         ]
     }
 
@@ -300,6 +352,9 @@ async def rpc_root(req: Request):
                 return JSONResponse({"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "json", "value": res}]}})
             elif name == "summarize_rental_prices":
                 res = summarize_rental_prices(**args)
+                return JSONResponse({"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "json", "value": res}]}})
+            elif name == "fetch_category_summary_from_s3":
+                res = fetch_category_summary_from_s3(**args)
                 return JSONResponse({"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "json", "value": res}]}})
             else:
                 print(f"⚠️ Unknown tool: {name}")
