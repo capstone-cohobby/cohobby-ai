@@ -4,49 +4,52 @@ version = "0.1.0"
 description = "Cohobby AI MCP-based orchestration system"
 authors = ["Kang SungGyeong <you@example.com>"]
 readme = "README.md"
-packages = [
-  { include = "orchestrator",   from = "apps" },
-  { include = "mcp_datalookup", from = "apps" },
-  { include = "mcp_pricing",    from = "apps" },
-  { include = "mcp_stats",      from = "apps" }
-]
 license = "MIT"
+
+# src 레이아웃 채택: src/ 아래 모든 패키지를 발견
+packages = [{ include = "*", from = "src" }]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
 
 # --- Core ---
-langchain = "^0.3.0"
-langchain-community = "^0.3.0"
-langchain-openai = "^0.2.0"
-fastmcp = "^2.12.4"               # FastMCP Python SDK
+langchain = "^0.3.12"
+langchain-community = "^0.3.25"
+langchain-anthropic = "0.3.21"      # Claude 연동 (LangChain)
+
 httpx = "^0.28.1"
 pydantic = "^2.8.0"
-tenacity = "^9.0.0"
-typer = "^0.12.3"
 python-dotenv = "^1.0.1"
+typer = "^0.12.3"
+tenacity = "^8.2.3"
+numpy = "^2.1.0"
 
-# --- Optional / Runtime ---
-uvicorn = { version = "^0.30.0", optional = true }
+# --- MCP 서버 (FastAPI 권장) ---
+fastapi = "^0.115.0"
+uvicorn = ">=0.31.1"
 
-[tool.poetry.extras]
-server = ["uvicorn"]
+# --- 기타 유틸 (있으면 사용) ---
+fastmcp = "^2.12.4"     # 사용 중이라면 유지
+boto3   = "^1.35"
+botocore = "^1.35"
+redis = "^6.4.0"
+mcp = "^1.17.0"
+websockets = "^14"
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.6.0"
+ruff = "^0.6.8"
 black = "^24.8.0"
 mypy = "^1.10.0"
 pytest = "^8.2.0"
 pytest-asyncio = "^0.23.0"
+zstandard = "==0.25.0"
 
 [tool.poetry.scripts]
-# 각 MCP 서버 실행 명령
-mcp-datalookup = "apps.mcp_datalookup.adapters.server:main"
-mcp-pricing = "apps.mcp_pricing.server:main"
-mcp-stats = "apps.mcp_stats.server:main"
+# MCP 서버 엔트리 
+mcp-datalookup = "src.cohobby_mcp.servers.datalookup.server:main"
 
-# 오케스트레이터 실행 명령
-orchestrator = "orchestrator.src.main:run"
+# Agent 실행 엔트리
+cohobby-agent  = "main:cli"   # src/main.py 안의 cli()
 
 [build-system]
 requires = ["poetry-core>=1.9.0"]
@@ -58,12 +61,20 @@ build-backend = "poetry.core.masonry.api"
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+# (경고 해결: lint 섹션으로 이전)
+[tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-ignore = ["E501"]
+ignore = ["E501", "UP038"]   # 3.10/3.11에서 isinstance 튜플 유지
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
 
 [tool.black]
 line-length = 100
 target-version = ["py310"]
+skip-string-normalization = true
 
 [tool.mypy]
 python_version = "3.10"
@@ -72,8 +83,10 @@ warn_unused_ignores = true
 warn_return_any = true
 disallow_untyped_defs = true
 check_untyped_defs = true
+# src 레이아웃 맞춤
+mypath = ["src"]
 exclude = ["tests/"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
-pythonpath = ["."]
+pythonpath = ["src"]
