@@ -1,237 +1,107 @@
-from __future__ import annotations
-
-import json, re, hashlib, unicodedata
-from datetime import datetime, timezone
-from typing import Any, Optional
-
-from cache.redis_client import get_cached, set_cached
+# judge.py
+import json, re
+from typing import Any, Optional, List
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableLambda, RunnableParallel
 
-from hosts.agent.llm import chat_claude, TOOLS
-from hosts.agent.prompts.prompt import (
-    SYSTEM_PROMPT_PROBE, SYSTEM_PROMPT_FINAL
+# --- 의존성 임포트 ---
+from ..llm import chat_claude # 1. LLM
+from ..schemas import (      # 2. Schemas
+    AgentInput, ProbeOutput, PriceDecision, DepositDecision, RulesDecision
 )
-from hosts.agent.schemas import (
-    AgentInput, ProbeOutput, BatchSummaryOutput, DecisionOutput
+from ..prompts.prompt import (       # 3. Prompts
+    SYSTEM_PROMPT_PROBE, SYSTEM_PROMPT_RAG_SUMMARIZER,
+    SYSTEM_PROMPT_PRICE, SYSTEM_PROMPT_DEPOSIT, SYSTEM_PROMPT_RULES
 )
-from hosts.agent.chains.batch_executor import run_batch_and_cache  # S3 fetch + 배치 판단
 
+# --- 1. LLM 응답 파서 (공통 유틸) ---
 
-# ─────────────────────────────────────────────────────────────
-# 공통 유틸
-# ─────────────────────────────────────────────────────────────
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-def _to_json_str(obj: Any) -> str:
-    return json.dumps(obj, ensure_ascii=False)
-
-async def _ainvoke_with_retry(chain, user_json: str, max_retries: int = 2):
-    last_err = None
-    for attempt in range(max_retries + 1):
-        try:
-            print(f"[JUDGE] LLM call attempt={attempt} payload_len={len(user_json)}")
-            res = await chain.ainvoke({"user_json": user_json})
-            print(f"[JUDGE] LLM call success on attempt={attempt}")
-            return res
-        except Exception as e:
-            last_err = e
-            print(f"[JUDGE][ERROR] attempt={attempt} failed: {type(e).__name__}: {e}")
-    print("[JUDGE][FATAL] All retries exhausted. Raising last error.")
-    raise last_err
-
-
-# ─────────────────────────────────────────────────────────────
-# JSON 파서
-# ─────────────────────────────────────────────────────────────
-def _extract_json(s: str) -> Optional[str]:
-    if not s: return None
-    # </thinking> 이후부터
+def _extract_json_from_content(content: Any) -> str:
+    """AIMessage.content에서 <thinking> 태그와 코드 블록을 제거하고 순수 JSON 추출"""
+    if not content:
+        raise ValueError("No content received from LLM")
+        
+    s = str(content) # AIMessage.content가 문자열이라고 가정
+    
     pos = s.rfind("</thinking>")
     if pos != -1:
         s = s[pos + len("</thinking>"):]
-    text = s.strip()
-    if not text: return None
-    # 코드펜스
-    for m in re.finditer(r"```(?:json)?\s*([\s\S]*?)\s*```", text):
-        cand = m.group(1).strip()
-        try:
-            json.loads(cand); return cand
-        except Exception:
-            pass
-    # 중괄호 스캔
-    braces = [m.start() for m in re.finditer(r"\{", text)]
-    for st in braces:
-        for ed in range(len(text), st + 1, -1):
-            cand = text[st:ed].strip()
-            if not cand.endswith("}"): continue
-            try:
-                json.loads(cand); return cand
-            except Exception:
-                continue
-    return None
-
-def _json_from_content(content: Any) -> str:
-    if isinstance(content, list):
-        # output_json 우선
-        for b in content:
-            if isinstance(b, dict) and b.get("type") == "output_json" and "output_json" in b:
-                return json.dumps(b["output_json"], ensure_ascii=False)
-    # 텍스트 합치기
-    if isinstance(content, list):
-        text = "".join((b.get("text","") or "") for b in content if isinstance(b, dict) and b.get("type")=="text")
-    else:
-        text = str(content or "")
-    cand = _extract_json(text)
-    if cand: return cand
     
-    # ===> 이 부분을 추가하세요! <===
-    print("="*50)
-    print("DEBUG: No JSON found in raw content from LLM. Raw text was:")
-    print(text)
-    print("="*50)
-    # ===> 여기까지 <===
+    s = s.strip()
     
-    raise ValueError("No valid JSON found in content")
+    match = re.search(r"\{.*\}", s, re.DOTALL)
+    if match:
+        return match.group(0)
+    
+    raise ValueError(f"No valid JSON object found in content: {s[:200]}...")
 
+# --- 2. Pydantic In -> Pydantic Out 체인 정의 ---
 
-# ─────────────────────────────────────────────────────────────
-# 캐시 키 유틸
-# ─────────────────────────────────────────────────────────────
-def _safe_get(payload, key: str) -> str:
-    try:
-        v = getattr(payload, key)
-    except Exception:
-        v = payload.get(key) if isinstance(payload, dict) else None
-    return "" if v is None else str(v)
+# [Helper] AgentInput Pydantic 모델을 LLM 입력(JSON 문자열)으로 변환
+agent_input_to_json_str = (
+    RunnableLambda(lambda x: x.model_dump_json(exclude_unset=True))
+    | RunnableLambda(lambda json_str: {"user_json": json_str})
+)
 
-def _norm(text: str) -> str:
-    s = (text or "").strip().lower()
-    return unicodedata.normalize("NFKC", s)
+# [Helper] LLM 출력(AIMessage)을 Pydantic 모델로 변환 (파서 사용)
+def create_pydantic_output_parser(pydantic_model: Any):
+    return (
+        RunnableLambda(lambda msg: _extract_json_from_content(getattr(msg, "content", None)))
+        | RunnableLambda(lambda json_str: pydantic_model.model_validate_json(json_str))
+    )
 
-def _make_signature(payload) -> str:
-    parts = [
-        _norm(_safe_get(payload, "name")),
-        _norm(_safe_get(payload, "description")),
-        _norm(_safe_get(payload, "category")),
-    ]
-    base = "|".join([p for p in parts if p]) or "unknown"
-    return hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
+# --- 2a. Probe 체인 ---
+prompt_probe = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT_PROBE), ("human", "{user_json}")])
 
-def _verdict_key(category: str, signature: str) -> str:
-    return f"verdict:{category}:{signature}"
+chain_probe = (
+    agent_input_to_json_str
+    | prompt_probe
+    | chat_claude
+    | create_pydantic_output_parser(ProbeOutput)
+)
 
-def _verdict_get(category: str, signature: str) -> Optional[DecisionOutput]:
-    try:
-        raw = get_cached(_verdict_key(category, signature))
-        if not raw:
-            return None
-        if isinstance(raw, dict):
-            return DecisionOutput.model_validate(raw)
-        if isinstance(raw, str):
-            return DecisionOutput.model_validate_json(raw)
-        return DecisionOutput.model_validate_json(json.dumps(raw, ensure_ascii=False))
-    except Exception:
-        return None
+# --- 2b. RAG 요약 체인 ---
+prompt_rag_summarizer = ChatPromptTemplate.from_template(SYSTEM_PROMPT_RAG_SUMMARIZER)
+# 이 체인은 AgentInput가 아닌 List[dict]를 받음
+chain_rag_summarizer = (
+    prompt_rag_summarizer
+    | chat_claude
+    | RunnableLambda(lambda msg: str(getattr(msg, "content", ""))) # 순수 텍스트 반환
+)
 
-def _verdict_set(category: str, signature: str, out: DecisionOutput) -> None:
-    try:
-        set_cached(_verdict_key(category, signature), out.model_dump())
-    except Exception:
-        pass
+# --- 2c. Finalize (Price) 체인 ---
+prompt_price = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT_PRICE), ("human", "{user_json}")])
+chain_price = (
+    agent_input_to_json_str
+    | prompt_price
+    | chat_claude
+    | create_pydantic_output_parser(PriceDecision)
+)
 
+# --- 2d. Finalize (Deposit) 체인 ---
+prompt_deposit = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT_DEPOSIT), ("human", "{user_json}")])
+chain_deposit = (
+    agent_input_to_json_str
+    | prompt_deposit
+    | chat_claude
+    | create_pydantic_output_parser(DepositDecision)
+)
 
-# ─────────────────────────────────────────────────────────────
-# LLM 체인
-# ─────────────────────────────────────────────────────────────
-_probe_prompt = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT_PROBE), ("human", "{user_json}")])
-_final_prompt = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT_FINAL), ("human", "{user_json}")])
+# --- 2e. Finalize (Rules) 체인 ---
+prompt_rules = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT_RULES), ("human", "{user_json}")])
+chain_rules = (
+    agent_input_to_json_str
+    | prompt_rules
+    | chat_claude
+    | create_pydantic_output_parser(RulesDecision)
+)
 
-_llm_probe = chat_claude.bind_tools(TOOLS, max_tokens=600)
-_llm_final = chat_claude.bind_tools(TOOLS, max_tokens=1500)
+# --- 3. 최종 병렬 체인 (Graph가 호출할 메인 체인) ---
 
-_chain_probe = _probe_prompt | _llm_probe
-_chain_final = _final_prompt | _llm_final
+chain_parallel_finalize = RunnableParallel(
+    price=chain_price,
+    deposit=chain_deposit,
+    rules=chain_rules,
+)
 
-
-# ─────────────────────────────────────────────────────────────
-# 메인 파이프라인: Quick Pass → 필요시 배치 → 재판단
-# ─────────────────────────────────────────────────────────────
-async def judge_once(payload: AgentInput) -> DecisionOutput:
-    inp = AgentInput(**payload.model_dump())
-    if inp.condition or inp.bought_at:
-        new_description = []
-        if inp.condition: new_description.append(f"상태: {inp.condition}")
-        if inp.bought_at: new_description.append(f"구입 시기: {inp.bought_at}")
-
-        if inp.description: # 기존 description이 있다면 합쳐주기
-            inp.description = inp.description + "\n" + "\n".join(new_description)
-        else:
-            inp.description = "\n".join(new_description)
-            
-    sig = _make_signature(payload)
-
-    # 0) 과거 최종판단 캐시가 있으면 즉시 반환
-    cached = _verdict_get(payload.category or "기타", sig)
-    if cached:
-        return cached
-
-    # 1) Probe: 카테고리/정보충분도만
-    raw_probe = await _ainvoke_with_retry(_chain_probe, _to_json_str(inp.model_dump()))
-    probe = ProbeOutput.model_validate_json(_json_from_content(getattr(raw_probe, "content", None)))
-    category = (probe.category or payload.category or "기타").strip()
-    info_need = probe.info_need
-
-    # 2) Quick Pass: 증거 없이 자기신뢰 평가
-    enriched = inp.model_dump()
-    enriched.update({
-        "category": category,
-        "evidence_summary": None,
-        "evidence_source": "none",
-    })
-    raw_final_q = await _ainvoke_with_retry(_chain_final, _to_json_str(enriched))
-    out_q = DecisionOutput.model_validate_json(_json_from_content(getattr(raw_final_q, "content", None)))
-
-    CONF_TH = 0.7
-    quick_ok = (out_q.confidence or 0.0) >= CONF_TH and out_q.decision != "uncertain"
-
-    #  Quick Pass 근거 구성 (배치 없을 때 쓸 기본 근거)
-    quick_evidence = {
-        "source": "self-quick-pass",
-        "reasoning": out_q.reasoning,
-    }
-
-    if quick_ok and info_need in ("none", "low"):
-        # Quick Pass로 충분하면 그대로 종료, 근거는 self-quick-pass로 남김
-        out_q.category = category
-        out_q.evidence_summary = quick_evidence
-        out_q.evidence_source = "self-quick-pass"
-        out_q.timestamp = out_q.timestamp or _now_iso()
-        _verdict_set(category, sig, out_q)
-        return out_q
-
-    # 3) Quick Pass 불충분 → 배치 근거 수집(Redis miss면 S3→LLM)
-    analysis = await run_batch_and_cache(name=inp.name, category=category, signature=sig)
-
-    # evidence 선택: 배치가 있으면 배치, 없으면 Quick Pass 근거
-    evidence_summary = analysis if analysis else quick_evidence
-    evidence_source  = "batch-llm" if analysis else "self-quick-pass"
-
-    enriched2 = inp.model_dump()
-    enriched2.update({
-        "category": category,
-        "evidence_summary": evidence_summary,
-        "evidence_source": evidence_source,
-    })
-    raw_final = await _ainvoke_with_retry(_chain_final, _to_json_str(enriched2))
-    out = DecisionOutput.model_validate_json(_json_from_content(getattr(raw_final, "content", None)))
-
-    # 방어적 정리(혹시 모델이 넣으면 제거)
-    if isinstance(out.price, dict):
-        out.price.pop("currency", None)
-        out.price.pop("unit", None)
-
-    out.category = category
-    out.timestamp = out.timestamp or _now_iso()
-    _verdict_set(category, sig, out)
-    return out
+# --- (참고) 이전의 judge_once 함수는 더 이상 필요 없음 ---
