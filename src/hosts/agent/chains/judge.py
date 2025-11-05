@@ -1,6 +1,6 @@
 # judge.py
 import json, re
-from typing import Any, Optional, List
+from typing import Any, Optional, Dict, List
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnableParallel
 
@@ -35,6 +35,27 @@ def _extract_json_from_content(content: Any) -> str:
     
     raise ValueError(f"No valid JSON object found in content: {s[:200]}...")
 
+# --- [추가] RAG 증거(List[dict])를 프롬프트용 단일 문자열로 변환 ---
+def _format_evidence_list_to_string(evidence_list: List[Dict[str, Any]]) -> Dict[str, str]:
+    """RAG 검색 결과(문서 리스트)를 LLM 프롬프트에 넣을 단일 문자열로 변환"""
+    if not evidence_list:
+        return {"evidence": "검색된 참고 문서가 없습니다."}
+    
+    formatted_summaries = []
+    # 리스트를 반복하며 각 문서를 포매팅합니다.
+    for i, doc in enumerate(evidence_list):
+        title = doc.get("title", "No Title")
+        snippet = doc.get("snippet", "No Snippet")
+        price = doc.get("price", "N/A")
+        location = doc.get("location", "N/A")
+        
+        header = f"--- 참고문서 {i+1}: {title} (가격: {price}, 위치: {location}) ---"
+        body = f"{snippet}"
+        formatted_summaries.append(f"{header}\n{body}")
+    
+    # 프롬프트 템플릿의 {evidence} 변수에 주입될 딕셔너리 반환
+    return {"source": "\n\n".join(formatted_summaries)}
+
 # --- 2. Pydantic In -> Pydantic Out 체인 정의 ---
 
 # [Helper] AgentInput Pydantic 모델을 LLM 입력(JSON 문자열)으로 변환
@@ -64,7 +85,8 @@ chain_probe = (
 prompt_rag_summarizer = ChatPromptTemplate.from_template(SYSTEM_PROMPT_RAG_SUMMARIZER)
 # 이 체인은 AgentInput가 아닌 List[dict]를 받음
 chain_rag_summarizer = (
-    prompt_rag_summarizer
+    RunnableLambda(_format_evidence_list_to_string)
+    | prompt_rag_summarizer
     | chat_claude
     | RunnableLambda(lambda msg: str(getattr(msg, "content", ""))) # 순수 텍스트 반환
 )
@@ -103,5 +125,3 @@ chain_parallel_finalize = RunnableParallel(
     deposit=chain_deposit,
     rules=chain_rules,
 )
-
-# --- (참고) 이전의 judge_once 함수는 더 이상 필요 없음 ---

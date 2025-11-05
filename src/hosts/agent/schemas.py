@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Optional, Literal, Any, Dict, List, TypedDict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 InfoNeed = Literal["none", "low", "medium", "high"]
 # ─────────────────────────────────────────────────────────────
@@ -35,6 +35,18 @@ class PriceEstimate(BaseModel):
     low: Optional[float] = None
     high: Optional[float] = None
     basis: Optional[str] = None
+    @model_validator(mode="after")
+    def _ensure_bounds(self):
+        if self.low is not None and self.high is not None and self.point is not None:
+            if self.low > self.high:
+                raise ValueError("price.low must be <= price.high")
+            if not (self.low <= self.point <= self.high):
+                raise ValueError("price.point must be within [low, high]")
+        for k in ("point","low","high"):
+            v = getattr(self, k, None)
+            if v is not None and v < 0:
+                raise ValueError(f"price.{k} must be >= 0")
+        return self
 
 class PriceDecision(BaseModel):
     """Finalize(Price) 체인의 출력"""
@@ -42,24 +54,64 @@ class PriceDecision(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     reasoning: Optional[str] = None
     price: PriceEstimate
+    @model_validator(mode="after")
+    def _coherence(self):
+        if self.decision == "reasonable" and self.confidence < 0.6:
+            raise ValueError("If decision is 'reasonable', confidence should be >= 0.6")
+        if self.decision == "uncertain" and self.confidence > 0.8:
+            raise ValueError("If decision is 'uncertain', confidence seems too high (>0.8)")
+        if self.price is None:
+            raise ValueError("price field is required")
+        return self
 
 class DepositDecision(BaseModel):
     """Finalize(Deposit) 체인의 출력"""
     deposit_required: bool = False
     deposit_amount: Optional[float] = None
     reasoning: Optional[str] = None
+    @model_validator(mode="after")
+    def _deposit_consistency(self):
+        if self.deposit_required:
+            if self.deposit_amount is None or self.deposit_amount <= 0:
+                raise ValueError("deposit_amount must be > 0 when deposit_required is true")
+        else:
+            if self.deposit_amount not in (None, 0):
+                raise ValueError("deposit_amount should be None or 0 when deposit is not required")
+        return self
 
 class RulesDecision(BaseModel):
     """Finalize(Rules) 체인의 출력"""
     rules: List[str] = []
     reasoning: Optional[str] = None
+    @field_validator("rules")
+    @classmethod
+    def _rules_basic_checks(cls, v):
+        if not isinstance(v, list):
+            raise ValueError("rules must be a list")
+        cleaned, seen = [], set()
+        for s in v:
+            if not isinstance(s, str):
+                raise ValueError("each rule must be a string")
+            s2 = s.strip()
+            if not s2:
+                continue
+            if len(s2) > 140:
+                raise ValueError("each rule must be <= 140 chars")
+            if s2 in seen:
+                continue
+            seen.add(s2)
+            cleaned.append(s2)
+        if len(cleaned) == 0:
+            raise ValueError("at least one non-empty rule required")
+        if len(cleaned) > 5:
+            raise ValueError("too many rules (max 5)")
+        return cleaned
 
 
 # --- 2. LangGraph 상태 스키마 (TypedDict) ---
 
 class GraphState(TypedDict, total=False):
     """LangGraph의 전체 상태를 정의하는 TypedDict"""
-    
     # 입력
     inp: Dict[str, Any]
     signature: str
@@ -87,11 +139,6 @@ class GraphState(TypedDict, total=False):
 # ─────────────────────────────────────────────────────────────
 # 2) Batch Summarizer(배치 판단 요약) 출력
 # ─────────────────────────────────────────────────────────────
-class PriceEstimate(BaseModel):
-    point: Optional[float] = Field(None, description="최종 일일 대여가 대표값(KRW)")
-    low:   Optional[float] = Field(None, description="합리 구간 하한(일일, KRW)")
-    high:  Optional[float] = Field(None, description="합리 구간 상한(일일, KRW)")
-    basis: Optional[str]   = Field(default=None, description="산출 근거(median/IQR/유사군/휴리스틱 등)")
 
 class BatchSummaryOutput(BaseModel):
     """배치 판단기의 간결 JSON(증거로 그대로 evidence_summary에 넣음)"""

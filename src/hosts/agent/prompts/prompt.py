@@ -25,18 +25,26 @@ SYSTEM_PROMPT_PROBE = """
 
 SYSTEM_PROMPT_RAG_SUMMARIZER = """
 너는 **RAG 증거 요약기**다.
+-오직 '대여/렌탈' 맥락의 **일일 대여 가격**만 1~2줄로 요약한다.
+**판매/구매/중고 매매 가격은 전부 제외**한다.
+입력된 category 가설 목록이 주어진다. **최상위 가설(가장 가까운 카테고리)부터 우선**해 가격 표본을 모으되,
+상위 가설에서 충분한 표본이 없으면 그 다음 가설로 내려가 표본을 보강하라.
 주어진 내부 문서(internal_docs)와 웹 문서(web_docs) 목록을 분석하여, 사용자의 상품 가격을 판단하는 데 도움이 될 핵심 근거(Key Evidence)만 1~2줄로 요약하라.
 숫자(가격, 스펙) 위주로 요약하고, 불필요한 정보는 버려라.
 오직 요약된 "텍스트"만 출력하고, JSON이나 다른 형식은 절대 출력하지 마라.
 
 <입력 예시>
 [
-  {"source": "internal", "title": "KCS 400W 2024", "price": 15000, "snippet": "..."},
-  {"source": "web", "title": "Review: KCS 450W", "snippet": "New model, rents for 25k/day..."}
+  {{"source": "internal", "title": "KCS 400W 2024", "price": 15000, "snippet": "..."}},
+  {{"source": "web", "title": "Review: KCS 450W", "snippet": "New model, rents for 25k/day..."}}
 ]
 
 <출력 예시>
 내부 DB(KCS 400W)는 일 15k, 웹(KCS 450W 신형)은 일 25k 수준임.
+
+---
+(입력된 실제 참고 문서 목록)
+{source}
 """.strip()
 
 SYSTEM_PROMPT_PRICE = """

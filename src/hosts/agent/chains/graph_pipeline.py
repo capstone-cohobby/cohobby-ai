@@ -11,15 +11,126 @@ from ..schemas import GraphState, AgentInput, PriceDecision
 
 # 2. 조립된 LCEL 체인
 from .judge import (
-    chain_probe, chain_rag_summarizer, chain_parallel_finalize
+    # --- [수정] --- chain_probe는 더 이상 사용하지 않습니다.
+    chain_rag_summarizer, chain_parallel_finalize
 )
 
 # 3. 개별 툴
 from ..tools.cache_tools import make_signature, get_verdict, set_verdict
-from ..tools.rag_tools import retrieve_internal, retrieve_web, merge_evidence
-
+from ..tools.rag_tools import retrieve_internal, retrieve_external_web, merge_evidence
+# run_batch_and_cache는 사용하지 않습니다.
 
 # --- LangGraph 노드(Node) 정의 ---
+import re
+
+RENTAL_TERMS = ["대여", "렌탈", "일일", "하루", "요금", "대여료", "보증금"]
+SALE_TERMS   = ["판매", "구매", "매매", "정가", "팝니다", "사세요"]
+
+CATEGORY_ALIASES = {
+    "전기자전거": ["전기자전거", "e-bike", "전동자전거"],
+    "자전거":     ["자전거", "road bike", "로드바이크", "mtb", "하이브리드 자전거"],
+    "킥보드":     ["전동킥보드", "e-scooter", "킥보드"],
+}
+
+WON_PATTERN = r'([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)\s*원'
+WINDOW = 24  # 가격 주변 문맥 길이
+
+def _candidate_categories(inp: dict) -> list[str]:
+    seed = [inp.get("category")] if inp.get("category") else []
+    text = " ".join([inp.get("name",""), inp.get("description","")]).lower()
+    guesses = []
+    if any(k in text for k in ["e-bike","전기자전거","전동자전거"]): guesses.append("전기자전거")
+    if any(k in text for k in ["킥보드","e-scooter"]): guesses.append("킥보드")
+    if any(k in text for k in ["자전거","road","mtb","하이브리드"]): guesses.append("자전거")
+    guesses.append("자전거")  # 초상위 백오프
+    ordered = []
+    for c in seed + guesses:
+        if c and c not in ordered:
+            ordered.append(c)
+    return ordered[:3]
+
+def _expand_terms(cats: list[str]) -> list[str]:
+    terms = []
+    for c in cats:
+        terms.extend(CATEGORY_ALIASES.get(c, [c]))
+    # unique 유지
+    return list(dict.fromkeys(terms))
+
+def _blend_queries(inp: dict) -> tuple[list[str], list[str]]:
+    """모델명이 빗나가도 회수율을 확보하기 위한 다중 가설/백오프 쿼리"""
+    name = (inp.get("name") or "").strip()
+    cats = _candidate_categories(inp)
+    cat_terms = _expand_terms(cats)
+    rental = " ".join(RENTAL_TERMS)
+
+    q1 = " ".join([name, " ".join(cat_terms), rental]).strip()
+    q2 = " ".join([" ".join(cat_terms), rental]).strip()
+    q3 = " ".join(["자전거 전동자전거 e-bike 전동킥보드", rental, "서울 당근 네이버카페 중고나라"]).strip()
+    return [q1, q2, q3], cats
+
+async def _retrieve_with_blend(retrieve_fn, inp: dict, top_k: int = 10):
+    queries, cats = _blend_queries(inp)
+    all_docs = []
+    for i, q in enumerate(queries, 1):
+        docs = await retrieve_fn(q)
+        print(f"[RAG] Try{i} q=`{q}` -> {len(docs)} docs")
+        all_docs.extend(docs)
+    return all_docs, cats, queries
+
+def _doc_text(doc) -> str:
+    # retriever별 스키마 차이 방지
+    title  = (getattr(doc, "title", None)  or doc.get("title")  or "") 
+    snip   = (getattr(doc, "snippet", None)or doc.get("snippet")or "")
+    body   = (getattr(doc, "text", None)   or doc.get("text")   or "")
+    return f"{title}\n{snip}\n{body}"
+
+def score_doc_for_rental(doc, cats: list[str]) -> float:
+    t = _doc_text(doc).lower()
+    s = 0.0
+    # 대여 용어 보너스
+    for k in RENTAL_TERMS:
+        if k in t: s += 1.5
+    # 판매 용어 패널티
+    for k in SALE_TERMS:
+        if k in t: s -= 1.2
+    # 카테고리 동의어 매칭 가중치
+    for c in cats:
+        for alias in CATEGORY_ALIASES.get(c, [c]):
+            if alias.lower() in t:
+                s += 1.5
+    return s
+
+def rerank_docs(docs: list, cats: list[str], topk: int = 12) -> list:
+    scored = [(d, score_doc_for_rental(d, cats)) for d in docs]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [d for d, _ in scored[:topk]]
+
+def extract_rental_prices(txt: str) -> list[int]:
+    prices = []
+    for m in re.finditer(WON_PATTERN, txt):
+        start = max(0, m.start()-WINDOW); end = m.end()+WINDOW
+        window = txt[start:end]
+        # 가격 주변에 대여 문맥이 동시 등장할 때만 유효
+        if any(k in window for k in RENTAL_TERMS):
+            v = int(m.group(1).replace(",", ""))
+            prices.append(v)
+    return prices
+
+def compute_price_stats_from_docs(docs: list) -> dict:
+    """상위 K 문서에서 대여 문맥의 가격 숫자들을 수집하고 통계 산출"""
+    vals = []
+    for d in docs[:12]:
+        vals += extract_rental_prices(_doc_text(d))
+    n = len(vals)
+    if n == 0:
+        return {"n": 0, "values": [], "low": None, "point": None, "high": None}
+    vals.sort()
+    def q_idx(p):  # 분위수 인덱스
+        return min(max(int(round(p*(n-1))), 0), n-1)
+    low   = vals[q_idx(0.25)]
+    point = vals[q_idx(0.50)]
+    high  = vals[q_idx(0.75)]
+    return {"n": n, "values": vals, "low": low, "point": point, "high": high}
 
 def enrich_input(state: GraphState) -> GraphState:
     """입력 전처리 및 서명 생성"""
@@ -41,45 +152,48 @@ def check_verdict_cache(state: GraphState) -> GraphState:
     if verdict:
         state["price_decision"] = verdict
         state["cache_hit"] = True
-        state["info_need"] = "none"
+        state["info_need"] = "none" # 캐시 히트 시 RAG 불필요
         print("[Graph] Cache HIT")
     else:
         state["cache_hit"] = False
+        state["info_need"] = "high" # 캐시 미스 시 RAG 필요
         print("[Graph] Cache MISS")
     return state
 
-async def run_probe(state: GraphState) -> GraphState:
-    """1차 Probe 실행 (Pydantic In -> Pydantic Out)"""
-    try:
-        ai = AgentInput(**state["inp"])
-        probe_out = await chain_probe.ainvoke(ai)
-        
-        state["probe"] = probe_out
-        state["category"] = probe_out.category or state["inp"].get("category") or "unknown"
-        state["info_need"] = probe_out.info_need
-        print(f"[Graph] Probe OK. Info Need: {state['info_need']}")
-    except Exception as e:
-        print(f"[Graph] Probe ERROR: {e}")
-        state["info_need"] = "medium" # 에러 시 안전하게 medium으로
-    return state
+async def _build_rag_query(state: GraphState) -> str:
+    inp = state["inp"]
+    name = (inp.get("name") or "").strip()
+    category = (inp.get("category") or "").strip()
+    # 대여/렌탈 중심 키워드 강제 부착
+    rental_terms = "대여 렌탈 일일 하루 요금 대여료 보증금"
+    # 부가 설명도 퀴리 가중치로 사용 (선택)
+    desc = (inp.get("description") or "").strip()
+    q = " ".join([name, category, rental_terms, desc]).strip()
+    return q
 
 async def retrieve_internal_node(state: GraphState) -> GraphState:
     """내부 RAG 실행"""
-    q = state["inp"].get("name", "")
-    state["internal_docs"] = await retrieve_internal(q)
+    docs, cats, queries = await _retrieve_with_blend(retrieve_internal, state["inp"])
+    # cat 가설은 웹에서 이미 들어갔을 수 있으니 유지/병합
+    state["cat_hypotheses"] = state.get("cat_hypotheses", cats)
+    state["internal_queries"] = queries
+    state["internal_docs"] = rerank_docs(docs, state["cat_hypotheses"])
     print(f"[Graph] Internal RAG: Found {len(state['internal_docs'])} docs")
     return state
 
 async def retrieve_web_node(state: GraphState) -> GraphState:
     """외부 RAG 실행"""
-    q = state["inp"].get("name", "")
-    state["web_docs"] = await retrieve_web(q)
+    docs, cats, queries = await _retrieve_with_blend(retrieve_external_web, state["inp"])
+    state["cat_hypotheses"] = cats
+    state["web_queries"] = queries
+    # 리랭킹
+    state["web_docs"] = rerank_docs(docs, cats)
     print(f"[Graph] Web RAG: Found {len(state['web_docs'])} docs")
     return state
 
 async def retrieve_both_node(state: GraphState) -> GraphState:
     """RAG 병렬 실행"""
-    print("[Graph] RAG Both")
+    print("[Graph] RAG Both (Internal + Web)")
     await asyncio.gather(retrieve_internal_node(state), retrieve_web_node(state))
     return state
 
@@ -93,7 +207,7 @@ def merge_evidence_node(state: GraphState) -> GraphState:
     return state
 
 async def summarize_rag_evidence(state: GraphState) -> GraphState:
-    """(신규) RAG 결과 요약 LLM 호출"""
+    """RAG 결과 요약 LLM 호출"""
     evidence = state.get("evidence")
     if not evidence:
         print("[Graph] RAG Summarizer: No evidence to summarize.")
@@ -110,30 +224,19 @@ async def summarize_rag_evidence(state: GraphState) -> GraphState:
         state["error"] = f"rag_summary_error: {e}"
     return state
 
-async def run_batch_node(state: GraphState) -> GraphState:
-    """S3 배치 툴 실행"""
-    try:
-        summary = await run_batch_and_cache(
-            name=state["inp"].get("name", ""),
-            category=state["category"],
-            signature=state["signature"]
-        )
-        state["batch_summary"] = summary
-        print(f"[Graph] Batch OK: {summary['decision'] if summary else 'No result'}")
-    except Exception as e:
-        print(f"[Graph] Batch ERROR: {e}")
-        state["error"] = f"batch_error: {e}"
-    return state
-
 async def finalize_parallel(state: GraphState) -> GraphState:
     """최종 판단 (병렬 LLM 호출)"""
     try:
         # 1. 최종 입력을 위한 AgentInput 모델 준비
-        #    RAG/Batch 요약 결과를 주입
+        #    RAG 요약 결과를 주입
         final_inp_dict = dict(state["inp"])
-        final_inp_dict["category"] = state.get("category")
+        
+        # --- [수정] --- 
+        # category는 probe가 아닌 원본 입력(inp)에서 가져옵니다.
+        final_inp_dict["category"] = state["inp"].get("category") 
         final_inp_dict["rag_summary"] = state.get("rag_summary")
-        final_inp_dict["batch_summary"] = state.get("batch_summary")
+        # batch_summary는 None으로 고정 (제거됨)
+        final_inp_dict["batch_summary"] = None 
         
         ai = AgentInput(**final_inp_dict)
 
@@ -162,68 +265,49 @@ async def finalize_parallel(state: GraphState) -> GraphState:
 
 
 # --- LangGraph 엣지(Edge) / 게이트(Gate) 정의 ---
-
 def gate_after_cache(state: GraphState) -> str:
     """캐시 히트 여부 분기"""
-    return "finalize_parallel" if state.get("cache_hit") else "run_probe"
+    if state.get("cache_hit"):
+        return "finalize_parallel"
+    return "retrieve_both"
 
-def gate_after_probe(state: GraphState) -> str:
-    """정보 필요도(info_need)에 따른 RAG 분기"""
-    need = state.get("info_need", "low")
-    if need == "none":
-        return "run_batch" # RAG 생략
-    if need in ("medium", "high"):
-        return "retrieve_both" # 내부 + 외부 RAG
-    return "retrieve_internal" # low (내부 RAG만)
 
 
 # --- 그래프 배선 ---
 
 graph = StateGraph(GraphState)
 
-# 노드 추가
+# --- [수정] 1. 노드 추가 (먼저 정의) ---
 graph.add_node("enrich_input", enrich_input)
 graph.add_node("check_verdict_cache", check_verdict_cache)
-graph.add_node("run_probe", run_probe)
 graph.add_node("retrieve_internal", retrieve_internal_node)
-graph.add_node("retrieve_web", retrieve_web_node)
+graph.add_node("retrieve_web", retrieve_web_node)  
 graph.add_node("retrieve_both", retrieve_both_node)
 graph.add_node("merge_evidence", merge_evidence_node)
 graph.add_node("summarize_rag_evidence", summarize_rag_evidence)
-graph.add_node("run_batch", run_batch_node)
 graph.add_node("finalize_parallel", finalize_parallel)
 
-# 엣지 연결
+
+# --- [수정] 2. 엣지 연결 (한 번만 정의) ---
 graph.set_entry_point("enrich_input")
 graph.add_edge("enrich_input", "check_verdict_cache")
 
-# 1. 캐시 분기
+# 1. 캐시 분기 
 graph.add_conditional_edges("check_verdict_cache", gate_after_cache, {
-    "finalize_parallel": "finalize_parallel", # 캐시 히트 시 바로 종료
-    "run_probe": "run_probe",           # 캐시 미스 시 Probe
+    "finalize_parallel": "finalize_parallel", # 캐시 히트 시
+    "retrieve_both": "retrieve_both"  # 캐시 미스 시
 })
 
-# 2. Probe -> RAG 분기
-graph.add_conditional_edges("run_probe", gate_after_probe, {
-    "run_batch": "run_batch",             # RAG 생략
-    "retrieve_both": "retrieve_both",     # RAG (둘 다)
-    "retrieve_internal": "retrieve_internal" # RAG (내부만)
-})
-
-# 3. RAG -> RAG 요약 -> 배치
-graph.add_edge("retrieve_internal", "merge_evidence")
-graph.add_edge("retrieve_web", "merge_evidence") # (retrieve_both는 둘 다 실행 후 자동으로 여기로 감)
+# 2. RAG -> RAG 요약 -> 최종 판단
 graph.add_edge("retrieve_both", "merge_evidence")
 graph.add_edge("merge_evidence", "summarize_rag_evidence")
-graph.add_edge("summarize_rag_evidence", "run_batch")
+graph.add_edge("summarize_rag_evidence", "finalize_parallel")
 
-# 4. 배치 -> 최종
-graph.add_edge("run_batch", "finalize_parallel")
+# 3. 최종 노드
 graph.add_edge("finalize_parallel", END)
 
 # 컴파일
 app = graph.compile()
-
 
 # --- 실행 헬퍼 ---
 async def run_once(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -243,10 +327,9 @@ async def run_once(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 if __name__ == "__main__":
     sample = {
-        "name": "전기자전거 KCS 48V 450W 15.6Ah",
-        "description": "배터리 최근 교체, 경량 프레임. 시승 가능.",
-        "category": "e-bike",
-        "condition": "A",
+        "name": "exo 응원봉",
+        "condition": "불 잘 들어옴",
+        "bought_at": "2023-05"
     }
     print("[Graph] Running sample...")
     
