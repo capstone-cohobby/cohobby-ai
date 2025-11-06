@@ -223,13 +223,16 @@ async def run_once(payload: Dict[str, Any]) -> Dict[str, Any]:
         "rules": final_state.get("rules_decision").model_dump() if final_state.get("rules_decision") else None,
         "cache_hit": final_state.get("cache_hit", False),
         "error": final_state.get("error"),
+        
+        # RAG Analyst가 본 원본 증거(evidence)를 출력합니다.
+        "evidence": final_state.get("evidence", [])
     }
     return output
 
 if __name__ == "__main__":
     sample = {
-        "name": "exo 응원봉",
-        "condition": "불 잘들어와요",
+        "name": "배드민턴 채",
+        "condition": "상태 이상 없음",
         "bought_at": "2023-05"
     }
     print("[Graph] Running sample...")

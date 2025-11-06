@@ -39,18 +39,19 @@ def _extract_json_from_content(content: Any) -> str:
 def _format_evidence_list_to_string(evidence_list: List[Dict[str, Any]]) -> Dict[str, str]:
     """RAG 검색 결과(문서 리스트)를 LLM 프롬프트에 넣을 단일 문자열로 변환"""
     if not evidence_list:
-        return {"evidence": "검색된 참고 문서가 없습니다."}
+        return {"source": "검색된 참고 문서가 없습니다."}
     
     formatted_summaries = []
     # 리스트를 반복하며 각 문서를 포매팅합니다.
     for i, doc in enumerate(evidence_list):
         title = doc.get("title", "No Title")
-        snippet = doc.get("snippet", "No Snippet")
+        body_text = doc.get("snippet")
+        if not body_text:
+            body_text = doc.get("content", "No Content")
         price = doc.get("price", "N/A")
-        location = doc.get("location", "N/A")
         
-        header = f"--- 참고문서 {i+1}: {title} (가격: {price}, 위치: {location}) ---"
-        body = f"{snippet}"
+        header = f"--- 참고문서 {i+1}: {title} (가격: {price} ---"
+        body = body_text.strip()
         formatted_summaries.append(f"{header}\n{body}")
     
     # 프롬프트 템플릿의 {evidence} 변수에 주입될 딕셔너리 반환
