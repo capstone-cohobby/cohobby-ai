@@ -16,14 +16,11 @@ class AgentInput(BaseModel):
     # RAG 및 Batch 요약 결과 주입
     rag_summary: Optional[str] = Field(None, description="RAG 검색 결과 요약")
     batch_summary: Optional[Dict[str, Any]] = Field(None, description="S3 배치 요약 결과")
+    rag_anlysis_report: Optional[Dict[str, Any]] = Field(None, description="RAG 분석 리포트")
 
 # ─────────────────────────────────────────────────────────────
 # 1) Probe(1차) 출력
 # ─────────────────────────────────────────────────────────────
-class ProbeOutput(BaseModel):
-    category: Optional[str] = None
-    info_need: Literal["none","low","medium","high"] = "none"
-    reasoning: Optional[str] = None
 class ProbeOutput(BaseModel):
     """Probe 체인의 출력"""
     category: Optional[str] = "unknown"
@@ -107,7 +104,13 @@ class RulesDecision(BaseModel):
             raise ValueError("too many rules (max 5)")
         return cleaned
 
-
+class RagAnalysisReport(BaseModel):
+    summary_text:str = Field(description="RAG 요약 텍스트")
+    analysis_reasoning: str = Field(description="내부/외부 데이터 비교, 충돌, 아웃라이어 판단 등 상세 분석 근거")
+    basis_of_summary: Literal["internal_priority", "web_priority", "blended", "no_data"] = Field(description="어떤 데이터를 우선했는지")
+    conflict_detected: bool = Field(description="내부 외부 데이터 간 충돌 여부")
+    outlier_info: Optional[str] = Field(description="아웃라이어 식별 시 그 이유 및 정보")
+    
 # --- 2. LangGraph 상태 스키마 (TypedDict) ---
 
 class GraphState(TypedDict, total=False):
@@ -127,6 +130,7 @@ class GraphState(TypedDict, total=False):
     # LLM 요약 결과 (Finalize 입력)
     rag_summary: Optional[str]
     batch_summary: Optional[Dict[str, Any]]
+    rag_analysis_report: Optional[Dict[str, Any]]
 
     # 최종 병렬 출력
     price_decision: Optional[PriceDecision]

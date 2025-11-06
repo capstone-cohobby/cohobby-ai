@@ -5,7 +5,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnableParallel
 
 # --- 의존성 임포트 ---
-from ..llm import chat_claude # 1. LLM
+from ..llm import chat_claude, chat_claude_summarizer # 1. LLM
 from ..schemas import (      # 2. Schemas
     AgentInput, ProbeOutput, PriceDecision, DepositDecision, RulesDecision
 )
@@ -87,9 +87,12 @@ prompt_rag_summarizer = ChatPromptTemplate.from_template(SYSTEM_PROMPT_RAG_SUMMA
 chain_rag_summarizer = (
     RunnableLambda(_format_evidence_list_to_string)
     | prompt_rag_summarizer
-    | chat_claude
-    | RunnableLambda(lambda msg: str(getattr(msg, "content", ""))) # 순수 텍스트 반환
+    | chat_claude_summarizer
+    | RunnableLambda(lambda msg: _extract_json_from_content(getattr(msg, "content", None)))
+    | RunnableLambda(lambda json_str: json.loads(json_str)
 )
+)
+
 
 # --- 2c. Finalize (Price) 체인 ---
 prompt_price = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT_PRICE), ("human", "{user_json}")])

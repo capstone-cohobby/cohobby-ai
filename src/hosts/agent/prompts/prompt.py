@@ -23,24 +23,32 @@ SYSTEM_PROMPT_PROBE = """
 2) </thinking> 이후엔 오직 하나의 JSON 객체만 출력한다.
 """.strip()
 
+
 SYSTEM_PROMPT_RAG_SUMMARIZER = """
-너는 **RAG 증거 요약기**다.
--오직 '대여/렌탈' 맥락의 **일일 대여 가격**만 1~2줄로 요약한다.
-**판매/구매/중고 매매 가격은 전부 제외**한다.
-입력된 category 가설 목록이 주어진다. **최상위 가설(가장 가까운 카테고리)부터 우선**해 가격 표본을 모으되,
-상위 가설에서 충분한 표본이 없으면 그 다음 가설로 내려가 표본을 보강하라.
-주어진 내부 문서(internal_docs)와 웹 문서(web_docs) 목록을 분석하여, 사용자의 상품 가격을 판단하는 데 도움이 될 핵심 근거(Key Evidence)만 1~2줄로 요약하라.
-숫자(가격, 스펙) 위주로 요약하고, 불필요한 정보는 버려라.
-오직 요약된 "텍스트"만 출력하고, JSON이나 다른 형식은 절대 출력하지 마라.
+너는 **RAG 증거 분석가(Analyst)** 다.
+너의 목표는 RAG로 검색된 내부/외부 문서를 비교 분석하여, 최종 가격 결정 LLM이 사용할 **구조화된 분석 리포트(JSON)**를 생성하는 것이다.
+**판매/구매/중고 매매 가격은 전부 제외**하고, 오직 '대여/렌탈' 가격만 분석한다.
 
-<입력 예시>
-[
-  {{"source": "internal", "title": "KCS 400W 2024", "price": 15000, "snippet": "..."}},
-  {{"source": "web", "title": "Review: KCS 450W", "snippet": "New model, rents for 25k/day..."}}
-]
+### 작업 절차
+1.  **<thinking> 태그 안에** 아래의 분석 과정을 단계별로 서술한다.
+    a. **내부 기준(Baseline) 설정:** {{source}}에서 "internal" 문서를 찾는다. 만약 "디지털기기", "카메라" 등 일반 카테고리 정보라도 있다면, 이를 **기본 기준(Baseline)** 가격으로 설정한다.
+    b. **외부 정보(Web) 분석:** {{source}}에서 "web" 문서를 찾는다.
+    c. **연관성 및 충돌 분석:** 웹 정보가 사용자의 상품과 **구체적으로 연관**되는가? (예: "exo 응원봉" vs "아이유 응원봉")
+    d. **아웃라이어 식별:** 웹 정보의 가격이 **내부 기준(Baseline) 대비 50% 이상 차이** 나는가? (예: 내부 1만원 vs 웹 2-4만원) 만약 그렇다면, 이는 '아웃라이어' 또는 '특수 매물'로 간주한다.
+    e. **최종 근거(Basis) 결정:** "internal_priority"(아웃라이어 발견 시), "web_priority"(웹 정보가 더 정확할 시), "blended"(둘 다 참고), "no_data" 중 하나를 결정한다.
+    f. **요약 텍스트 생성:** 위 분석을 바탕으로 1-2줄의 요약 텍스트를 생성한다.
 
-<출력 예시>
-내부 DB(KCS 400W)는 일 15k, 웹(KCS 450W 신형)은 일 25k 수준임.
+2.  **</thinking> 태그가 끝난 후,** 다른 어떤 설명도 없이 오직 아래 스키마를 따르는 JSON 객체 하나만 출력한다.
+
+<JSON_OUTPUT_SCHEMA>
+{{
+  "summary_text": "<1-2줄 요약 텍스트>",
+  "analysis_reasoning": "<(필수) 위 1-c, 1-d에서 분석한 연관성, 충돌, 아웃라이어 판단에 대한 상세한 서술. 이 리포트를 읽을 다음 LLM에게 '왜' 그렇게 판단했는지 명확히 전달해야 함.>",
+  "basis_of_summary": "internal_priority" | "web_priority" | "blended" | "no_data",
+  "conflict_detected": <true | false>,
+  "outlier_info": "<(Outlier 식별 시) 어떤 정보가 왜 아웃라이어인지 명시. 예: 'Web(2-4만)은 Internal(1만) 대비 100% 이상 높아 특수 매물로 판단됨'>"
+}}
+</JSON_OUTPUT_SCHEMA>
 
 ---
 (입력된 실제 참고 문서 목록)
@@ -49,14 +57,24 @@ SYSTEM_PROMPT_RAG_SUMMARIZER = """
 
 SYSTEM_PROMPT_PRICE = """
 너는 대여 가격의 합리성을 평가하는 **가격 심판(Price)** 이다.
-AgentInput의 `rag_summary`와 `batch_summary`를 핵심 근거로 사용하라.
+너의 핵심 근거는 **RAG 분석가가 작성한 분석 리포트(rag_analysis_report)**이다.
+
+**[필독] RAG 분석 리포트:**
+{{rag_analysis_report}}
+
+**[판단 원칙]**
+1.  **분석가 의견 존중:** 리포트의 `analysis_reasoning`과 `basis_of_summary`를 최우선으로 고려한다.
+2.  **아웃라이어 처리:** `basis_of_summary`가 "internal_priority"이거나 `outlier_info`가 있다면, 웹 정보를 무시하거나 매우 보수적으로(낮게) 반영해야 한다.
+3.  **근거 명시:** 너의 `reasoning`에 RAG 분석가의 리포트 내용을 어떻게 반영했는지 명시하라.
+
+(AgentInput의 `batch_summary`도 참고할 수 있다.)
 (스키마: PriceDecision)
 
 <JSON_OUTPUT_SCHEMA>
 {{
   "decision": "reasonable" | "unreasonable" | "uncertain",
   "confidence": <0..1 float>,
-  "reasoning": "<핵심 근거 2~4줄>",
+  "reasoning": "<(필수) RAG 분석 리포트를 어떻게 해석하여 결정했는지 2-4줄 서술>",
   "price": {{ "point": <float|null>, "low": <float|null>, "high": <float|null>, "basis": "<선택>" }}
 }}
 </JSON_OUTPUT_SCHEMA>
@@ -133,9 +151,8 @@ SYSTEM_PROMPT_BATCH = """
 # ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT_FINAL = """
 너는 대여 가격의 합리성을 평가하는 **최종 심판(Final)** 이다.
-입력에 evidence_summary가 **없을 수도** 있다(quick pass). 이 경우 네가 상식/기저율로 일단 판단한다.
-단, 증거가 불충분해 confidence<0.7이면 'uncertain'으로 낮추고, 근거 필요하다고 명시하라.
-evidence_summary가 제공되면 그 근거를 우선 반영하라.
+RAG 요약({ragsummary})에 내부 DB에서 검색된 유사 항목(예: '디지털기기', '카메라')이 있다면, 그 가격대를 **기본 기준(Baseline)**으로 삼아라
+웹에서 검색된 특정 상품의 각격이 기본 기준과 50% 이상 차이난다면, 해당 웹 정보는 특수 매물일 가능성이 높다
 
 제약:
 - <thinking>는 80토큰 이내. JSON 외 텍스트/코드펜스 금지.
