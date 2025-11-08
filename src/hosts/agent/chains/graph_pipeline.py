@@ -11,12 +11,12 @@ from ..schemas import GraphState, AgentInput
 
 # 2. 조립된 LCEL 체인
 from .judge import (
-    chain_rag_summarizer, chain_parallel_finalize
+    chain_rag_summarizer, chain_parallel_finalize, chain_derive_rental_price
 )
 
 # 3. 개별 툴
 from ..tools.cache_tools import make_signature, get_verdict, set_verdict
-from ..tools.rag_tools import retrieve_internal, retrieve_external_web, merge_evidence
+from ..tools.rag_tools import retrieve_internal, retrieve_external_web, merge_evidence, retrieve_sale_price_web
 
 # --- LangGraph 노드(Node) 정의 ---
 
@@ -51,12 +51,28 @@ def check_verdict_cache(state: GraphState) -> GraphState:
 async def _build_rag_query(state: GraphState) -> str:
     inp = state["inp"]
     name = (inp.get("name") or "").strip()
-    category = (inp.get("category") or "").strip()
-    # 대여/렌탈 중심 키워드 강제 부착
-    rental_terms = "대여 렌탈 일일 하루 요금 대여료 보증금"
-    # 부가 설명도 퀴리 가중치로 사용 (선택)
     desc = (inp.get("description") or "").strip()
-    q = " ".join([name, category, rental_terms, desc]).strip()
+    cat = (inp.get("category") or "").strip()
+    terms =[]
+    if name:
+        terms.append(name)
+    if cat: terms.append(cat)
+    if desc: terms.append(desc)
+    # name/desc에 이미 "대여/렌탈" 류가 없을 때만
+    base = " ".join(x for x in [name, cat, desc] if x).strip()
+    tail = "대여 렌탈 일일 요금 대여료 보증금"
+    q = base if any(t in base for t in ["대여","렌탈","대여료","요금"]) else f"{base} {tail}".strip()
+    print(f"[Graph] RAG Query = {q}")  # 쿼리 로깅
+    return q
+
+async def _build_sale_query(state: GraphState) -> str:
+    """[신규] '판매' 쿼리 생성기"""
+    inp = state["inp"]
+    name = (inp.get("name") or "").strip()
+    # '대여' 대신 '중고 시세' 키워드 사용
+    sale_terms = "중고 시세 가격"
+    q = " ".join([name, sale_terms]).strip()
+    print(f"[Graph] RAG Query = {q}")  # 쿼리 로깅
     return q
 
 async def retrieve_internal_node(state: GraphState) -> GraphState:
@@ -135,6 +151,7 @@ async def finalize_parallel(state: GraphState) -> GraphState:
         final_inp_dict = dict(state["inp"])
         final_inp_dict["category"] = state["inp"].get("category") 
         final_inp_dict["rag_analyis_report"] = state.get("rag_analysis_report")
+        final_inp_dict["evidence"] = state.get("evidence")
         
         # (선택) 하위 호환성을 위해 rag_summary에도 텍스트 요약본 주입
         if isinstance(state.get("rag_analysis_report"), dict):
@@ -166,6 +183,49 @@ async def finalize_parallel(state: GraphState) -> GraphState:
         state["error"] = f"finalize_error: {e}"
     return state
 
+async def retrieve_sale_price_node(state: GraphState) -> GraphState:
+    """[신규] 판매가 RAG 실행"""
+    print("[Graph] Fallback: Retrieving Sale Price data...")
+    q = await _build_sale_query(state)
+    
+    # [수정] 판매가 검색은 웹만 사용 (내부 DB는 대여가 중심이라 가정)
+    sale_docs = await retrieve_sale_price_web(q)
+    
+    state["sale_evidence"] = sale_docs
+    print(f"[Graph] Fallback Sale RAG: Found {len(sale_docs)} docs")
+    return state
+
+async def derive_rental_price_node(state: GraphState) -> GraphState:
+    """[신규] 판매가 기반 대여가 추론 LLM 호출"""
+    print("[Graph] Fallback: Invoking Deriver LLM...")
+    
+    if not state.get("sale_evidence"):
+        print("[Graph] Fallback: No sale evidence found. Skipping deriver.")
+        # 추론 실패 시 기존의 'uncertain' 결정이 유지됨
+        return state
+
+    try:
+        # [수정] chain_derive_rental_price는 state 딕셔너리의 일부를 입력받음
+        deriver_input = {
+            "inp": state.get("inp"),
+            "sale_evidence": state.get("sale_evidence")
+        }
+        derived_price_decision = await chain_derive_rental_price.ainvoke(deriver_input)
+        
+        # [수정] 기존 PriceDecision을 덮어쓰기
+        state["price_decision"] = derived_price_decision
+        print("[Graph] Fallback Deriver: Price OK (Overwritten)")
+        
+        # [신규] 최종 결정된 가격을 캐시에 저장
+        set_verdict(state["signature"], derived_price_decision)
+        print("[Cache] SET OK (Derived):", state["signature"])
+        
+    except Exception as e:
+        print(f"[Graph] Fallback Deriver ERROR: {e}")
+        state["error"] = f"deriver_error: {e}"
+        # 추론 실패 시 기존 'uncertain' 결정이 캐시되지 않고 유지됨
+        
+    return state
 
 # --- LangGraph 엣지(Edge) / 게이트(Gate) 정의 ---
 def gate_after_cache(state: GraphState) -> str:
@@ -174,6 +234,21 @@ def gate_after_cache(state: GraphState) -> str:
         return "finalize_parallel"
     return "retrieve_both"  # 캐시 미스 시 RAG 수행
 
+# [신규] 가격 결정 후 Fallback 여부 분기
+def gate_after_price(state: GraphState) -> str:
+    """가격 결정의 신뢰도에 따라 Fallback 실행 여부 결정"""
+    price_decision = state.get("price_decision")
+    
+    if price_decision and price_decision.decision == "reasonable":
+        print("[Graph] Gate: Price is 'reasonable'. Caching and Ending.")
+        # [신규] 'reasonable'일 때만 캐시 저장
+        set_verdict(state["signature"], price_decision)
+        print("[Cache] SET OK (Reasonable):", state["signature"])
+        return "END"
+    else:
+        decision_str = price_decision.decision if price_decision else "None"
+        print(f"[Graph] Gate: Price is '{decision_str}'. Triggering Fallback Sale RAG.")
+        return "fallback_sale_search"
 # --- 그래프 배선 ---
 
 graph = StateGraph(GraphState)
@@ -185,7 +260,8 @@ graph.add_node("retrieve_both", retrieve_both_node)
 graph.add_node("merge_evidence", merge_evidence_node)
 graph.add_node("summarize_rag_evidence", summarize_rag_evidence)
 graph.add_node("finalize_parallel", finalize_parallel)
-
+graph.add_node("retrieve_sale_price_node", retrieve_sale_price_node)
+graph.add_node("derive_rental_price_node", derive_rental_price_node)
 
 # --- [수정] 2. 엣지 연결 (한 번만 정의) ---
 graph.set_entry_point("enrich_input")
@@ -204,11 +280,16 @@ graph.add_edge("retrieve_both", "merge_evidence")
 graph.add_edge("merge_evidence", "summarize_rag_evidence")
 graph.add_edge("summarize_rag_evidence", "finalize_parallel")
 
-# 4. 최종 노드
-graph.add_edge("finalize_parallel", END)
+# 4. [신규] 최종 결정 후 Fallback 분기
+graph.add_conditional_edges("finalize_parallel", gate_after_price, {
+    "END": END, # 'reasonable'일 때
+    "fallback_sale_search": "retrieve_sale_price_node" # 'uncertain'일 때
+})
+graph.add_edge("retrieve_sale_price_node", "derive_rental_price_node")
+graph.add_edge("derive_rental_price_node", END)
 
 # 컴파일
-app = graph.compile()
+app_graph = graph.compile()
 
 # --- 실행 헬퍼 ---
 async def run_once(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -231,9 +312,9 @@ async def run_once(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 if __name__ == "__main__":
     sample = {
-        "name": "배드민턴 채",
+        "name": "exo 응원봉",
         "condition": "상태 이상 없음",
-        "bought_at": "2023-05"
+        "bought_at": "2023-05",
     }
     print("[Graph] Running sample...")
     

@@ -9,7 +9,7 @@ import chromadb.api.client
 
 
 def get_embedder():
-    model = os.getenv("EMB_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+    model = os.getenv("EMB_MODEL", "jhgan/ko-sroberta-multitask")
     return embedding_functions.SentenceTransformerEmbeddingFunction(model_name=model)
 
 def get_client() -> chromadb.api.client.ClientAPI:

@@ -11,7 +11,7 @@ from ..schemas import (      # 2. Schemas
 )
 from ..prompts.prompt import (       # 3. Prompts
     SYSTEM_PROMPT_PROBE, SYSTEM_PROMPT_RAG_SUMMARIZER,
-    SYSTEM_PROMPT_PRICE, SYSTEM_PROMPT_DEPOSIT, SYSTEM_PROMPT_RULES
+    SYSTEM_PROMPT_PRICE, SYSTEM_PROMPT_DEPOSIT, SYSTEM_PROMPT_RULES, SYSTEM_PROMPT_DERIVER
 )
 
 # --- 1. LLM 응답 파서 (공통 유틸) ---
@@ -128,4 +128,35 @@ chain_parallel_finalize = RunnableParallel(
     price=chain_price,
     deposit=chain_deposit,
     rules=chain_rules,
+)
+
+# --- [신규] 4. Fallback 대여가 추론기 체인 ---
+
+# [신규 Helper] (Deriver용) 입력 포매터
+def _prepare_deriver_input(state_dict: Dict[str, Any]) -> Dict[str, str]:
+    """GraphState의 inp와 sale_evidence를 {user_json}과 {sale_evidence_str}로 변환"""
+    inp = state_dict.get("inp", {})
+    sale_evidence = state_dict.get("sale_evidence", [])
+    
+    # 1. user_json 생성
+    user_json_str = json.dumps(inp, ensure_ascii=False)
+    
+    # 2. sale_evidence_str 생성 (기존 포매터 재활용)
+    sale_evidence_str = _format_evidence_list_to_string(sale_evidence).get("source")
+    
+    return {
+        "user_json": user_json_str,
+        "sale_evidence_str": sale_evidence_str
+    }
+
+# [신규] 대여가 추론기 체인
+prompt_deriver = ChatPromptTemplate.from_messages([
+    ("system", SYSTEM_PROMPT_DERIVER), # {sale_evidence_str} 변수 사용
+    ("human", "{user_json}")
+])
+chain_derive_rental_price = (
+    RunnableLambda(_prepare_deriver_input)
+    | prompt_deriver
+    | chat_claude # 결정용 LLM 사용
+    | create_pydantic_output_parser(PriceDecision)
 )

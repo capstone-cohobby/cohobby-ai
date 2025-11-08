@@ -56,7 +56,7 @@ def normalize_record(r: Dict[str, Any]) -> Dict[str, Any]:
         "snippet": snippet,
         "price": r.get("rental_price") or r.get("rental_price_raw"),
         "category": r.get("category") or r.get("category_hint"),
-        "source": (r.get("source") or "web").strip().lower(),
+        "source": (r.get("source") or "internal").strip().lower(),
         "ts": r.get("ts") or r.get("timestamp"),
         "url": r.get("post_link"),
         "location": r.get("location"),

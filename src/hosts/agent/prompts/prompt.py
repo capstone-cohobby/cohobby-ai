@@ -63,9 +63,12 @@ SYSTEM_PROMPT_PRICE = """
 {{rag_analysis_report}}
 
 **[판단 원칙]**
-1.  **분석가 의견 존중:** 리포트의 `analysis_reasoning`과 `basis_of_summary`를 최우선으로 고려한다.
-2.  **아웃라이어 처리:** `basis_of_summary`가 "internal_priority"이거나 `outlier_info`가 있다면, 웹 정보를 무시하거나 매우 보수적으로(낮게) 반영해야 한다.
-3.  **근거 명시:** 너의 `reasoning`에 RAG 분석가의 리포트 내용을 어떻게 반영했는지 명시하라.
+1. 무조건 evidence 목록을 먼저 확인하라. 
+2. evidence 목록 안에 사용자의 입력(name)과 유사한 항목이 있는지 반드시 확인하라.
+3. 만약 유사 항목이 있다면, 그 가격대를 **기본 기준(Baseline)**으로 삼아라
+4. **분석가 의견 존중:** 리포트의 `analysis_reasoning`과 `basis_of_summary`를 고려한다.
+5.  **아웃라이어 처리:** `basis_of_summary`가 "internal_priority"이거나 `outlier_info`가 있다면, 웹 정보를 무시하거나 매우 보수적으로(낮게) 반영해야 한다.
+6.  **근거 명시:** 너의 `reasoning`에 RAG 분석가의 리포트 내용을 어떻게 반영했는지 명시하라.
 
 (AgentInput의 `batch_summary`도 참고할 수 있다.)
 (스키마: PriceDecision)
@@ -76,6 +79,46 @@ SYSTEM_PROMPT_PRICE = """
   "confidence": <0..1 float>,
   "reasoning": "<(필수) RAG 분석 리포트를 어떻게 해석하여 결정했는지 2-4줄 서술>",
   "price": {{ "point": <float|null>, "low": <float|null>, "high": <float|null>, "basis": "<선택>" }}
+}}
+</JSON_OUTPUT_SCHEMA>
+
+규칙:
+1) <thinking> ... </thinking> 안에만 생각을 쓰고,
+2) </thinking> 이후엔 **오직 하나의 JSON**만 출력한다.
+""".strip()
+
+SYSTEM_PROMPT_DERIVER = """
+너는 **대여 가격 추론기(Deriver)** 다.
+너의 목표는 이 상품의 '대여' 정보를 찾지 못해 **"uncertain"** 판정을 받은 상품에 대해, '판매/중고' 가격 정보를 바탕으로 합리적인 '일일 대여가'를 **추론**하는 것이다.
+
+---
+[입력 1: 판매/중고 가격 정보 (RAG)]
+{sale_evidence_str}
+
+[입력 2: 사용자 상품 정보]
+{user_json}
+---
+
+[작업 절차]
+1.  <thinking> 태그 안에 너의 추론 과정을 서술한다.
+2.  `sale_evidence_str`에서 상품의 평균 '판매가' 또는 '중고 시세'를 파악한다.
+3.  `user_json`의 '카테고리', '상태(condition)', '구매 시기(bought_at)'를 분석하여 상품의 감가상각 및 대여 수요 특성을 판단한다.
+4.  '판매가' 대비 합리적인 '일일 대여 비율'을 결정한다. (예: 3%~10%)
+    - (예: 전자기기, 고가 장비는 비율이 낮음: 3-5%)
+    - (예: 파티 용품, 단기 사용 굿즈는 비율이 높음: 5-10%)
+5.  최종 '일일 대여가'를 추론하여 PriceDecision 스키마로 출력한다.
+
+[중요 규칙]
+- 너의 결정은 '추론'에 기반하므로, `decision`은 "uncertain"으로 유지하되, `confidence`는 0.3~0.5 사이로 설정한다.
+- `reasoning`에는 '판매가' 얼마를 기준으로 '대여가'를 어떻게 추론했는지 반드시 명시한다.
+- `basis` 필드에 "판매가 기반 추론"이라고 명시한다.
+
+<JSON_OUTPUT_SCHEMA>
+{{
+  "decision": "uncertain",
+  "confidence": <0.3~0.5 float>,
+  "reasoning": "<(필수) 판매가/중고가 XX원을 기준으로 일일 대여료를 XX원으로 추론함.>",
+  "price": {{ "point": <float>, "low": <float>, "high": <float>, "basis": "판매가 기반 추론" }}
 }}
 </JSON_OUTPUT_SCHEMA>
 

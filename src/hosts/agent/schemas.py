@@ -17,6 +17,7 @@ class AgentInput(BaseModel):
     rag_summary: Optional[str] = Field(None, description="RAG 검색 결과 요약")
     batch_summary: Optional[Dict[str, Any]] = Field(None, description="S3 배치 요약 결과")
     rag_anlysis_report: Optional[Dict[str, Any]] = Field(None, description="RAG 분석 리포트")
+    evidence: Optional[List[Dict[str, Any]]] = Field(None, description="[신규] 요약 전 원본 RAG 증거 목록")
 
 # ─────────────────────────────────────────────────────────────
 # 1) Probe(1차) 출력
@@ -110,6 +111,15 @@ class RagAnalysisReport(BaseModel):
     basis_of_summary: Literal["internal_priority", "web_priority", "blended", "no_data"] = Field(description="어떤 데이터를 우선했는지")
     conflict_detected: bool = Field(description="내부 외부 데이터 간 충돌 여부")
     outlier_info: Optional[str] = Field(description="아웃라이어 식별 시 그 이유 및 정보")
+
+
+class EstimationResponse(BaseModel):
+    price: PriceDecision
+    deposit: DepositDecision
+    rules: RulesDecision
+    cache_hit: bool = False
+    error: Optional[str] = None
+    evidence: List[Dict[str, Any]] = []
     
 # --- 2. LangGraph 상태 스키마 (TypedDict) ---
 
@@ -131,6 +141,7 @@ class GraphState(TypedDict, total=False):
     rag_summary: Optional[str]
     batch_summary: Optional[Dict[str, Any]]
     rag_analysis_report: Optional[Dict[str, Any]]
+    sale_evidence: Optional[List[Dict[str, Any]]]
 
     # 최종 병렬 출력
     price_decision: Optional[PriceDecision]
