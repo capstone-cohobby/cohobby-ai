@@ -7,7 +7,7 @@ from cache.redis_client import set_cached, get_cached
 from hosts.agent.llm import chat_claude, TOOLS
 from langchain_core.prompts import ChatPromptTemplate
 from hosts.agent.prompts.prompt import SYSTEM_PROMPT_BATCH
-from hosts.agent.tools.mcp_tools import get_price_summary_from_s3  # MCP 툴 (S3→records)
+from src.hosts.agent.tools.batch_tools import get_price_summary_from_s3  # MCP 툴 (S3→records)
 
 BUCKET = os.getenv("AWS_S3_BUCKET")
 KEY    = os.getenv("S3_INPUT_KEY", "out.jsonl")
@@ -153,11 +153,5 @@ async def run_batch_and_cache(name: str, category: str, signature: str) -> Optio
         print(f"[Batch][ERROR] JSON parse failed: {type(e).__name__}: {e}")
         print(f"[Batch][DUMP] type(raw)={type(raw)} repr(raw)={repr(raw)[:600]}")
         return None
-
-    # 3) Redis 저장 (가능할 때만)
-    try:
-        set_cached(_batch_key(category, signature), analysis)
-    except Exception:
-        pass
 
     return analysis

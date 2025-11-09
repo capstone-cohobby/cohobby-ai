@@ -12,6 +12,23 @@ dist/
 *.egg-info/
 *.egg
 *.whl
+# === ChromaDB vector store ===
+# 기본 인덱스 디렉토리 (기본: ./chroma)
+chroma/
+chromadb/
+chroma_db/
+chroma_index/
+chroma_storage/
+chroma_cache/
+chroma_data/
+
+# 임시 메타데이터, SQLite 인덱스 파일
+*.chroma
+*.chroma.lock
+*.sqlite3
+*.sqlite
+*.db
+*.db-journal
 
 # ---------------------------
 # Poetry / 가상환경
