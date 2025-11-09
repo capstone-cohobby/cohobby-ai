@@ -106,7 +106,8 @@ export TAVILY_API_KEY=...
 python -m scripts.indexer_chroma
 
 **4. 그래프 실행**
-poetry run python -m hosts.agent.chains.graph_pipeline
+poetry run uvicorn main:app --reload --host 0.0.0.0 --port 8080
+
 
 ### API I/O 예시
 **요청(입력 JSON)**
