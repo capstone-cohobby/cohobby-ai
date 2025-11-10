@@ -1,48 +1,87 @@
-# llm.py  — MCP 의존성 제거 & 결정/요약 LLM 분리 버전
+# llm.py — LLM 팩토리 버전
 
 from __future__ import annotations
-from langchain_anthropic import ChatAnthropic
-from anthropic import Anthropic
+from langchain_core.language_models import BaseChatModel
+from langchain_openai import ChatOpenAI
+# from langchain_google_vertexai import ChatVertexAI  # (참고) 나중에 Gemini 추가 시
 
 # 프로젝트 설정
-from .config import settings  # Settings: anthropic_* / *_temperature / *_tokens / *_timeout
+from .config import settings
+
+def _create_chat_model(
+    provider: str,
+    api_key: str,
+    model_name: str,
+    temperature: float,
+    max_tokens: int,
+    timeout: float
+) -> BaseChatModel:
+    """설정에 맞는 LLM 클라이언트를 생성하는 팩토리 함수"""
+    
+    provider = provider.lower()
+    
+    if provider == "openai":
+        return ChatOpenAI(
+            openai_api_key=api_key,
+            model=model_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+        )
+    
+    elif provider == "anthropic":
+        return ChatAnthropic(
+            anthropic_api_key=api_key,
+            model=model_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+        )
+    
+    # (참고) Google Gemini 추가 시
+    # elif provider == "google":
+    #     return ChatVertexAI(
+    #         model_name=model_name,
+    #         temperature=temperature,
+    #         max_output_tokens=max_tokens,
+    #         # ... google용 파라미터 ...
+    #     )
+        
+    else:
+        raise ValueError(f"지원하지 않는 LLM 프로바이더: {provider}")
 
 # ------------------------------------------------------------
-# 1) 판정/결정 체인용 LLM (Probe / Price / Deposit / Rules)
-#    - JSON 파싱 안정성과 일관성 우선: 낮은 temperature, 응답 길이 짧게
+# 1) 판정/결정 체인용 LLM
 # ------------------------------------------------------------
-chat_claude_decision = ChatAnthropic(
-    anthropic_api_key=settings.anthropic_api_key,
-    model=getattr(settings, "anthropic_model_decision", settings.anthropic_model),
-    temperature=getattr(settings, "temperature_decision", 0.1),
-    max_tokens=getattr(settings, "max_output_tokens_decision", 1024),
-    timeout=getattr(settings, "llm_request_timeout_secs", 60),
+chat_decision = _create_chat_model(
+    provider=settings.llm_provider,
+    api_key=settings.llm_api_key,
+    model_name=settings.llm_model_decision,
+    temperature=settings.temperature_decision,
+    max_tokens=settings.max_output_tokens_decision,
+    timeout=settings.llm_request_timeout_secs,
 )
 
 # ------------------------------------------------------------
-# 2) 요약 체인용 LLM (RAG Summarizer)
-#    - 맥락 보존/가독성: 약간 높은 temperature, 토큰 여유
+# 2) 요약 체인용 LLM
 # ------------------------------------------------------------
-chat_claude_summarizer = ChatAnthropic(
-    anthropic_api_key=settings.anthropic_api_key,
-    model=getattr(settings, "anthropic_model_summarizer", settings.anthropic_model),
-    temperature=getattr(settings, "temperature_summarizer", 0.3),
-    max_tokens=getattr(settings, "max_output_tokens_summarizer", 1536),
-    timeout=getattr(settings, "llm_request_timeout_secs", 60),
+chat_summarizer = _create_chat_model(
+    provider=settings.llm_provider,
+    api_key=settings.llm_api_key,
+    model_name=settings.llm_model_summarizer,
+    temperature=settings.temperature_summarizer,
+    max_tokens=settings.max_output_tokens_summarizer,
+    timeout=settings.llm_request_timeout_secs,
 )
 
-# ✅ 기존 호환: judge.py 등에서 import하는 chat_claude는 "결정용"을 기본으로 둠
-chat_claude = chat_claude_decision
+# 기존 호환: chat_claude를 import하는 다른 파일들을 위해 제네릭 별칭 제공
+chat_model = chat_decision
 
-# (선택) 원시 SDK 클라이언트 — 도구/유틸 레벨에서 직접 호출이 필요할 때만 사용
-anthropic_client = Anthropic(
-    api_key=settings.anthropic_api_key,
-    timeout=getattr(settings, "llm_request_timeout_secs", 60),
-)
+
+
 
 __all__ = [
-    "chat_claude",              # 호환 별칭 (= 결정용)
-    "chat_claude_decision",     # 결정/판정 체인
-    "chat_claude_summarizer",   # RAG 요약 체인
-    "anthropic_client",
+    "chat_model",           # 호환 별칭 (= 결정용)
+    "chat_decision",        # 결정/판정 체인 (제네릭)
+    "chat_summarizer"      # RAG 요약 체인 (제네릭)
 ]

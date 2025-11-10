@@ -150,7 +150,7 @@ async def finalize_parallel(state: GraphState) -> GraphState:
         #    RAG 요약 결과를 주입
         final_inp_dict = dict(state["inp"])
         final_inp_dict["category"] = state["inp"].get("category") 
-        final_inp_dict["rag_analyis_report"] = state.get("rag_analysis_report")
+        final_inp_dict["rag_analysis_report"] = state.get("rag_analysis_report")
         final_inp_dict["evidence"] = state.get("evidence")
         
         # (선택) 하위 호환성을 위해 rag_summary에도 텍스트 요약본 주입

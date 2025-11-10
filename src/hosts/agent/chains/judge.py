@@ -5,7 +5,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnableParallel
 
 # --- 의존성 임포트 ---
-from ..llm import chat_claude, chat_claude_summarizer # 1. LLM
+from ..llm import chat_decision, chat_summarizer# 1. LLM
 from ..schemas import (      # 2. Schemas
     AgentInput, ProbeOutput, PriceDecision, DepositDecision, RulesDecision
 )
@@ -78,7 +78,7 @@ prompt_probe = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT_PROBE)
 chain_probe = (
     agent_input_to_json_str
     | prompt_probe
-    | chat_claude
+    | chat_decision
     | create_pydantic_output_parser(ProbeOutput)
 )
 
@@ -88,7 +88,7 @@ prompt_rag_summarizer = ChatPromptTemplate.from_template(SYSTEM_PROMPT_RAG_SUMMA
 chain_rag_summarizer = (
     RunnableLambda(_format_evidence_list_to_string)
     | prompt_rag_summarizer
-    | chat_claude_summarizer
+    | chat_summarizer
     | RunnableLambda(lambda msg: _extract_json_from_content(getattr(msg, "content", None)))
     | RunnableLambda(lambda json_str: json.loads(json_str)
 )
@@ -100,7 +100,7 @@ prompt_price = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT_PRICE)
 chain_price = (
     agent_input_to_json_str
     | prompt_price
-    | chat_claude
+    | chat_decision
     | create_pydantic_output_parser(PriceDecision)
 )
 
@@ -109,7 +109,7 @@ prompt_deposit = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT_DEPO
 chain_deposit = (
     agent_input_to_json_str
     | prompt_deposit
-    | chat_claude
+    | chat_decision
     | create_pydantic_output_parser(DepositDecision)
 )
 
@@ -118,7 +118,7 @@ prompt_rules = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT_RULES)
 chain_rules = (
     agent_input_to_json_str
     | prompt_rules
-    | chat_claude
+    | chat_decision
     | create_pydantic_output_parser(RulesDecision)
 )
 
@@ -157,6 +157,6 @@ prompt_deriver = ChatPromptTemplate.from_messages([
 chain_derive_rental_price = (
     RunnableLambda(_prepare_deriver_input)
     | prompt_deriver
-    | chat_claude # 결정용 LLM 사용
+    | chat_decision # 결정용 LLM 사용
     | create_pydantic_output_parser(PriceDecision)
 )
