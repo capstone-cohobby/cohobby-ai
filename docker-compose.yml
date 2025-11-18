@@ -13,42 +13,22 @@ services:
       timeout: 3s
       retries: 10
 
-  mcp-data-lookup:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: mcp
-    container_name: mcp-data-lookup
-    env_file:
-      - .env
-    ports:
-      - "${MCP_PORT:-8765}:8765"
-    volumes:
-      - ./data:/data:ro
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-
   agent:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: agent
+    image: your-docker-id/cohobby-agent:latest
     container_name: cohobby-agent
     depends_on:
-      - redis
-      - mcp-data-lookup
+      redis:
+        condition: service_healthy
     ports:
-      - "${AGENT_PORT:-8080}:8080"
+      - "8000:8080"   # 브라우저에서는 :8000으로 접속
+    env_file:
+      - .env
     environment:
-      REDIS_URL: redis://redis:6379/0
-      MCP_DATA_LOOKUP_URL: http://mcp-data-lookup:8765
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
-      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-ap-northeast-2}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CHROMA_PERSIST_DIR=/app/chroma_db
+    volumes:
+      - ./chroma_db:/app/chroma_db
 
 volumes:
   redis-data:
