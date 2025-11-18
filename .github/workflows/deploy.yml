@@ -54,10 +54,10 @@ jobs:
             cd /home/ubuntu/cohobby-ai   # 👉 EC2에서 docker-compose.yml 있는 경로로 수정
 
             echo "Pull latest image from Docker Hub..."
-            docker compose pull
+            docker-compose pull
 
             echo "Restart containers..."
-            docker compose up -d
+            docker-compose up -d
 
             echo "Cleanup old images..."
             docker image prune -f
