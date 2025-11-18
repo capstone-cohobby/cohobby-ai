@@ -15,8 +15,6 @@ python = ">=3.10,<3.13"
 # --- Core ---
 langchain = "^1.0.5"
 langchain-community = "^0.4.1"
-langchain-anthropic = "^1.0.2"      # Claude 연동 (LangChain)
-anthropic = ">=0.37.0"
 langgraph = "^1.0.2"
 
 httpx = "^0.28.1"
@@ -24,10 +22,8 @@ pydantic = "^2.8.0"
 python-dotenv = "^1.0.1"
 typer = "^0.12.3"
 tenacity = "^8.2.3"
-numpy = "^2.1.0"
 
 # --- Search / RAG ---
-elasticsearch = "^8.14.0"
 tavily-python = "^0.5.0"
 
 # --- MCP 서버 (FastAPI 권장) ---
@@ -35,16 +31,12 @@ fastapi = "^0.115.0"
 uvicorn = ">=0.31.1"
 
 # --- 기타 유틸 (있으면 사용) ---
-fastmcp = "^2.12.4"     # 사용 중이라면 유지
 boto3   = "^1.35"
 botocore = "^1.35"
 redis = "^6.4.0"
-mcp = "^1.17.0"
-websockets = "^14"
 tiktoken = "^0.12.0"
 rapidfuzz = "^3.14.3"
 chromadb = "^1.3.0"
-sentence-transformers = "^5.1.2"
 langchain-text-splitters = "^1.0.0"
 langchain-core = "^1.0.4"
 langchain-openai = "^1.0.2"
