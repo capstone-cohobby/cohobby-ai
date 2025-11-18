@@ -4,7 +4,7 @@ import asyncio
 from typing import Dict, Any
 
 from langgraph.graph import StateGraph, END
-
+from .adapters import normalize_doc
 # --- 의존성 임포트 ---
 # 1. 상태 정의
 from ..schemas import GraphState, AgentInput
@@ -63,6 +63,7 @@ async def _build_rag_query(state: GraphState) -> str:
     tail = "대여 렌탈 일일 요금 대여료 보증금"
     q = base if any(t in base for t in ["대여","렌탈","대여료","요금"]) else f"{base} {tail}".strip()
     print(f"[Graph] RAG Query = {q}")  # 쿼리 로깅
+    
     return q
 
 async def _build_sale_query(state: GraphState) -> str:
@@ -106,6 +107,21 @@ async def retrieve_both_node(state: GraphState) -> GraphState:
     
     print(f"[Graph] Internal RAG: Found {len(state['internal_docs'])} docs")
     print(f"[Graph] Web RAG: Found {len(state['web_docs'])} docs")
+    # ✅ 정규화 후 합치기
+    k = state.get("k", 5)
+    merged_norm = [normalize_doc(d, "internal") for d in (internal_docs or [])] + \
+                  [normalize_doc(d, "web") for d in (web_docs or [])]
+                  
+    from .ls_retrieval_logger import log_retrieval_to_langsmith
+    # LangSmith 로깅 (Rel@k / Rental@k / Fresh@k)
+    log_retrieval_to_langsmith(
+        query=q,
+        docs=merged_norm,
+        k=k,
+        freshness_days=state.get("freshness_days", 90),
+        metadata={"node": "retrieve_both", "retriever": "hybrid-time-decay"},
+    )
+    
     return state
 
 async def merge_evidence_node(state: GraphState) -> GraphState:
@@ -294,7 +310,7 @@ app_graph = graph.compile()
 # --- 실행 헬퍼 ---
 async def run_once(payload: Dict[str, Any]) -> Dict[str, Any]:
     state: GraphState = {"inp": payload}
-    final_state = await app.ainvoke(state)
+    final_state = await app_graph.ainvoke(state)
     
     print("\n--- Final State ---")
     # Pydantic 모델을 dict로 변환하여 출력
