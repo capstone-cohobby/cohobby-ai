@@ -59,6 +59,9 @@ jobs:
             echo "Pull latest image from Docker Hub..."
             docker compose pull
 
+            echo "Stopping and removing old containers..."
+            sudo docker compose down
+
             echo "Restart containers..."
             docker compose up -d
 
