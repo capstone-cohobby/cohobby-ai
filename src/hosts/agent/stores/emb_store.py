@@ -3,14 +3,16 @@ from __future__ import annotations
 import os, uuid
 from typing import List, Dict, Any, Optional
 import chromadb
-from chromadb.utils import embedding_functions
+from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 from rapidfuzz import fuzz
 import chromadb.api.client
 
 
 def get_embedder():
-    model = os.getenv("EMB_MODEL", "jhgan/ko-sroberta-multitask")
-    return embedding_functions.SentenceTransformerEmbeddingFunction(model_name=model)
+    return OpenAIEmbeddingFunction(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        model_name="text-embedding-3-small"
+    )
 
 def get_client() -> chromadb.api.client.ClientAPI:
     """
