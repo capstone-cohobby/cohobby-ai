@@ -5,7 +5,7 @@ from typing import List, Dict, Any
 from tqdm import tqdm
 from datetime import datetime
 from .ls_retrieval_logger import log_retrieval_to_langsmith  # 우리가 만든 함수
-from .graph_pipeline import app_graph  # 너의 LangGraph 그래프 (retrieve + answer)
+from ..graph_pipeline import app_graph  # 너의 LangGraph 그래프 (retrieve + answer)
 import asyncio
 
 from dotenv import load_dotenv;

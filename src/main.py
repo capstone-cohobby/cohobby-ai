@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # 스키마
 from hosts.agent.schemas import AgentInput ,EstimationResponse
 
-from hosts.agent.chains.graph_pipeline import app_graph
+from src.hosts.agent.graph_pipeline import app_graph
 
 logging.basicConfig(
     level=logging.INFO,
