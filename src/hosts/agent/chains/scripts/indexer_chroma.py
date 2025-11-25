@@ -19,14 +19,14 @@ load_dotenv()
 
 from hosts.agent.stores.emb_store import ChromaHybridIndex
 from hosts.agent.tools.loaders.s3_loader import iter_s3_records
-from hosts.agent.utils.text_chunker import chunk_record
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 REGION = os.getenv("AWS_REGION", "ap-northeast-2")
 BUCKET = os.getenv("AWS_S3_BUCKET")
 PREFIX = os.getenv("S3_INPUT_PREFIX")
 KEY    = os.getenv("S3_INPUT_KEY")
-CHUNK  = int(os.getenv("INDEX_CHUNK_SIZE", "600"))
-OVERLP = int(os.getenv("INDEX_CHUNK_OVERLAP", "80"))
+CHUNK  = int(os.getenv("INDEX_CHUNK_SIZE", "200"))
+OVERLP = int(os.getenv("INDEX_CHUNK_OVERLAP", "40"))
 
 import hashlib, uuid
 
@@ -77,19 +77,21 @@ def main():
     n_int = 0
     n_web = 0
     batch_int = []
-    #batch_web = []
     idx_internal = ChromaHybridIndex("cohobby_internal")
-    #idx_web      = ChromaHybridIndex("cohobby_web")
     skipped_no_text = 0
     skipped_dupe    = 0
     processed_ids   = set()
-
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK,
+        chunk_overlap=OVERLP,
+    )
     for raw in iter_s3_records(bucket=BUCKET, prefix=PREFIX, key=KEY, region=REGION):
         n_tot += 1
         rec = normalize_record(raw)
 
         # title/snippet 모두 비면 검색 품질이 너무 떨어짐 → 스킵(카운트)
-        if not (rec.get("title") or rec.get("snippet")):
+        text = (rec.get("title") or rec.get("snippet"))
+        if not text.strip():
             skipped_no_text += 1
             continue
   
@@ -99,12 +101,29 @@ def main():
             continue
         processed_ids.add(record_id)
 
-        chunks = chunk_record(rec, chunk_size=CHUNK, overlap=OVERLP)
+        chunks = splitter.split_text(text)
+        
+        # 저장용 문서를 생성해서 batch에 추가
+        for chunk in chunks:
+            batch_int.append({
+                "id": record_id,
+                "title": rec["title"],
+                "snippet": chunk,
+                "price": rec["price"],
+                "category": rec["category"],
+                "source": rec["source"],
+                "ts": rec["ts"],
+                "url": rec["url"],
+                "location": rec["location"],
+                "model": rec["model"],
+            })
 
-        batch_int.extend(chunks); n_int += 1
-        if len(batch_int) >= 500:
-            idx_internal.upsert_docs(batch_int); batch_int = []
-            print("[Index] upsert internal (500)")
+        n_int += 1
+
+    if len(batch_int) >= 500:
+        idx_internal.upsert_docs(batch_int)
+        batch_int = []
+        print("[Index] upsert internal (500)")
 
     if batch_int:
         idx_internal.upsert_docs(batch_int)

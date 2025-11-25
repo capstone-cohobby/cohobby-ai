@@ -31,8 +31,8 @@ SYSTEM_PROMPT_RAG_SUMMARIZER = """
 
 ### 작업 절차
 1.  **<thinking> 태그 안에** 아래의 분석 과정을 단계별로 서술한다.
-    a. **내부 기준(Baseline) 설정:** {{source}}에서 "internal" 문서를 찾는다. 만약 "디지털기기", "카메라" 등 일반 카테고리 정보라도 있다면, 이를 **기본 기준(Baseline)** 가격으로 설정한다.
-    b. **외부 정보(Web) 분석:** {{source}}에서 "web" 문서를 찾는다.
+    a. **내부 기준(Baseline) 설정:** {source}에서 "internal" 문서를 찾는다. 만약 "디지털기기", "카메라" 등 일반 카테고리 정보라도 있다면, 이를 **기본 기준(Baseline)** 가격으로 설정한다.
+    b. **외부 정보(Web) 분석:** {source}에서 "web" 문서를 찾는다.
     c. **연관성 및 충돌 분석:** 웹 정보가 사용자의 상품과 **구체적으로 연관**되는가? (예: "exo 응원봉" vs "아이유 응원봉")
     d. **아웃라이어 식별:** 웹 정보의 가격이 **내부 기준(Baseline) 대비 50% 이상 차이** 나는가? (예: 내부 1만원 vs 웹 2-4만원) 만약 그렇다면, 이는 '아웃라이어' 또는 '특수 매물'로 간주한다.
     e. **최종 근거(Basis) 결정:** "internal_priority"(아웃라이어 발견 시), "web_priority"(웹 정보가 더 정확할 시), "blended"(둘 다 참고), "no_data" 중 하나를 결정한다.
@@ -57,28 +57,27 @@ SYSTEM_PROMPT_RAG_SUMMARIZER = """
 
 SYSTEM_PROMPT_PRICE = """
 너는 대여 가격의 합리성을 평가하는 **가격 심판(Price)** 이다.
-너의 핵심 근거는 **RAG 분석가가 작성한 분석 리포트(rag_analysis_report)**이다.
+너의 핵심 근거는 **RAG 분석 리포트**와 **검색된 원본 증거(Evidence)**이다.
 
-**[필독] RAG 분석 리포트:**
-{{rag_analysis_report}}
+**[1] RAG 분석 리포트 (요약본):**
+{rag_analysis_report}
+
+**[2] 검색된 원본 증거 (상세 데이터):**
+{evidence_str}
 
 **[판단 원칙]**
-1. 무조건 evidence 목록을 먼저 확인하라. 
-2. evidence 목록 안에 사용자의 입력(name)과 유사한 항목이 있는지 반드시 확인하라.
-3. 만약 유사 항목이 있다면, 그 가격대를 **기본 기준(Baseline)**으로 삼아라
-4. **분석가 의견 존중:** 리포트의 `analysis_reasoning`과 `basis_of_summary`를 고려한다.
-5.  **아웃라이어 처리:** `basis_of_summary`가 "internal_priority"이거나 `outlier_info`가 있다면, 웹 정보를 무시하거나 매우 보수적으로(낮게) 반영해야 한다.
-6.  **근거 명시:** 너의 `reasoning`에 RAG 분석가의 리포트 내용을 어떻게 반영했는지 명시하라.
-
-(AgentInput의 `batch_summary`도 참고할 수 있다.)
-(스키마: PriceDecision)
+1. **원본 증거(Evidence) 최우선:** 리포트보다 원본 증거에 있는 구체적인 가격(숫자)을 더 신뢰하라.
+2. **유사 항목 찾기:** evidence 목록에서 사용자의 입력(name)과 가장 유사한 항목을 찾아 그 가격을 **기본 기준(Baseline)**으로 삼아라.
+3. **분석가 의견 참고:** 리포트의 `analysis_reasoning`을 참고하여 아웃라이어(특수 매물)를 걸러내라.
+4. **결정:** 증거가 충분하다면 구체적인 가격(`point`, `low`, `high`)을 산정하고, 부족하다면 `uncertain`으로 판정하라.
+5. **통화 단위**:** 모든 가격 수치는 **대한민국 원(KRW) 단위여야 한다. (예: 50000, 7500)
 
 <JSON_OUTPUT_SCHEMA>
 {{
   "decision": "reasonable" | "unreasonable" | "uncertain",
   "confidence": <0..1 float>,
-  "reasoning": "<(필수) RAG 분석 리포트를 어떻게 해석하여 결정했는지 2-4줄 서술>",
-  "price": {{ "point": <float|null>, "low": <float|null>, "high": <float|null>, "basis": "<선택>" }}
+  "reasoning": "<원본 증거 중 어떤 항목(제목/가격)을 참조했는지 명시하여 서술>",
+  "price": {{ "point": <int|null>, "low": <int|null>, "high": <int|null>, "basis": "<선택>" }}
 }}
 </JSON_OUTPUT_SCHEMA>
 
@@ -89,54 +88,74 @@ SYSTEM_PROMPT_PRICE = """
 
 SYSTEM_PROMPT_DERIVER = """
 너는 **대여 가격 추론기(Deriver)** 다.
-너의 목표는 이 상품의 '대여' 정보를 찾지 못해 **"uncertain"** 판정을 받은 상품에 대해, '판매/중고' 가격 정보를 바탕으로 합리적인 '일일 대여가'를 **추론**하는 것이다.
+현재 대여 시세 정보가 부족하여, **'판매가' 또는 '중고 시세'**를 바탕으로 합리적인 대여료를 논리적으로 역산해야 한다.
 
----
-[입력 1: 판매/중고 가격 정보 (RAG)]
+[입력 데이터]
+1. 상품 정보: {user_json}
+2. 검색된 가격 정보: 
 {sale_evidence_str}
 
-[입력 2: 사용자 상품 정보]
-{user_json}
----
+[추론 논리 가이드]
+대여료는 **"구매가 대비 몇 회 대여 시 원금을 회수할 것인가(ROI)"**를 기준으로 산정한다.
 
-[작업 절차]
-1.  <thinking> 태그 안에 너의 추론 과정을 서술한다.
-2.  `sale_evidence_str`에서 상품의 평균 '판매가' 또는 '중고 시세'를 파악한다.
-3.  `user_json`의 '카테고리', '상태(condition)', '구매 시기(bought_at)'를 분석하여 상품의 감가상각 및 대여 수요 특성을 판단한다.
-4.  '판매가' 대비 합리적인 '일일 대여 비율'을 결정한다. (예: 3%~10%)
-    - (예: 전자기기, 고가 장비는 비율이 낮음: 3-5%)
-    - (예: 파티 용품, 단기 사용 굿즈는 비율이 높음: 5-10%)
-5.  최종 '일일 대여가'를 추론하여 PriceDecision 스키마로 출력한다.
+1. **기준 가격(Reference Price) 선정:**
+   - 검색 결과 중 상품명/상태가 가장 일치하는 신뢰할 만한 가격(신품 or 중고)을 하나 선택한다.
+   - **출처 URL**을 반드시 확보한다.
 
-[중요 규칙]
-- 너의 결정은 '추론'에 기반하므로, `decision`은 "uncertain"으로 유지하되, `confidence`는 0.3~0.5 사이로 설정한다.
-- `reasoning`에는 '판매가' 얼마를 기준으로 '대여가'를 어떻게 추론했는지 반드시 명시한다.
-- `basis` 필드에 "판매가 기반 추론"이라고 명시한다.
+2. **카테고리별 감가상각률 적용 (비율 결정):**
+   - **고위험/빠른 감가 (IT, 카메라, 명품의류):** 파손 위험이 높고 유행이 빠름.
+     -> 원금 회수 목표: 20~30회 (일일 대여료 = 기준가의 **3.0% ~ 5.0%**)
+   - **중위험 (캠핑, 스포츠, 공구):** 내구성이 좋으나 부피가 큼.
+     -> 원금 회수 목표: 30~50회 (일일 대여료 = 기준가의 **2.0% ~ 3.0%**)
+   - **저위험/느린 감가 (도서, 단순 잡화):**
+     -> 원금 회수 목표: 50회 이상 (일일 대여료 = 기준가의 **1.0% ~ 2.0%**)
+   - **단기 이벤트성 (파티용품, 코스튬):** 수요가 특정 시기에 몰림.
+     -> 원금 회수 목표: 10~15회 (일일 대여료 = 기준가의 **7.0% ~ 10.0%**)
+
+3. **현실적 보정 (최소 금액):**
+   - 계산된 금액이 **3,000원 미만**일 경우, 거래 수고비를 고려하여 최소 3,000~5,000원 사이로 보정한다.
+
+[출력 요구사항]
+- `reasoning`: **"네이버 최저가(URL) 50만원을 기준으로, 카메라는 감가상각이 빠른 품목이므로 4% 요율(25회 회수 목표)을 적용하여 20,000원으로 산정함."** 처럼 구체적인 논리를 서술할 것.
+- 통화 단위 **대한민국 원(KRW)** 으로 표기할 것. (예: 15000, 4500)
 
 <JSON_OUTPUT_SCHEMA>
 {{
   "decision": "uncertain",
-  "confidence": <0.3~0.5 float>,
-  "reasoning": "<(필수) 판매가/중고가 XX원을 기준으로 일일 대여료를 XX원으로 추론함.>",
-  "price": {{ "point": <float>, "low": <float>, "high": <float>, "basis": "판매가 기반 추론" }}
+  "confidence": <0.3~0.6>,
+  "reasoning": "<위 논리에 따른 구체적 서술>",
+  "price": {{
+      "point": <일일 대여료>,
+      "low": <최소 예상치>,
+      "high": <최대 예상치>,
+      "basis": "판매가 기반 추론 (ROI 역산)",
+      "reference_price": <기준 가격(숫자)>,
+      "reference_type": "new" | "used",
+      "reference_url": "<출처 URL>"
+  }}
 }}
 </JSON_OUTPUT_SCHEMA>
-
-규칙:
-1) <thinking> ... </thinking> 안에만 생각을 쓰고,
-2) </thinking> 이후엔 **오직 하나의 JSON**만 출력한다.
 """.strip()
 
 SYSTEM_PROMPT_DEPOSIT = """
 너는 **보증금 정책 결정자(Deposit)** 다.
-AgentInput의 카테고리, 가격, RAG 요약 등을 바탕으로 보증금 필요 여부와 금액을 산정하라.
-(스키마: DepositDecision)
+사용자가 등록한 상품과 유사한 **과거 분쟁/사고 사례(Dispute Cases)**를 분석하여 보증금 정책을 결정하라.
+
+[참고: 과거 분쟁 사례]
+{dispute_evidence_str}
+
+[판단 기준]
+1. 분쟁 사례가 '파손', '먹튀(분실)', '고가 부품 교체' 등 치명적이라면 `deposit_required`를 true로 설정하라.
+2. 사례가 없거나 경미하다면 false로 설정하라.
+3. **[중요]** `deposit_required`가 true라면, 반드시 `deposit_amount`에 **0보다 큰 합리적인 금액(예: 30000, 50000)**을 입력해야 한다.
+   - **절대 0이나 null을 출력하지 말라.** (0원을 적을 거면 required를 false로 해라)
+4. 보증금 금액은 **대한민국 원(KRW)** 단위로 설정하라.
 
 <JSON_OUTPUT_SCHEMA>
 {{
   "deposit_required": <bool>,
-  "deposit_amount": <float|null>,
-  "reasoning": "<한두 줄>"
+  "deposit_amount": <int|null>,
+  "reasoning": "<분쟁 사례를 인용하여 사유 서술>"
 }}
 </JSON_OUTPUT_SCHEMA>
 
@@ -147,12 +166,14 @@ AgentInput의 카테고리, 가격, RAG 요약 등을 바탕으로 보증금 필
 
 SYSTEM_PROMPT_RULES = """
 너는 **대여 규칙 생성기(Rules)** 다.
-AgentInput의 카테고리, 상품 설명, RAG/Batch 요약 등을 바탕으로, 이 상품에 대한 합리적인 대여 규칙 3가지를 생성하라.
-(스키마: RulesDecision)
+**과거 분쟁 사례(Dispute Cases)**를 방지하기 위한 구체적인 특약 규칙 5가지를 생성하라.
+
+[참고: 과거 분쟁 사례]
+{dispute_evidence_str}
 
 <JSON_OUTPUT_SCHEMA>
 {{
-  "rules": ["<규칙 1>", "<규칙 2>", "<규칙 3>"],
+  "rules": ["<규칙 1>", "<규칙 2>", "<규칙 3>", "<규칙 4>", "<규칙 5">],
   "reasoning": "<규칙 생성 사유 한 줄>"
 }}
 </JSON_OUTPUT_SCHEMA>

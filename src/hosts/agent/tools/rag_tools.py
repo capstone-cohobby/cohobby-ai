@@ -6,8 +6,9 @@ from tavily import TavilyClient
 import os
 import asyncio
 
-# 컬렉션 이름 고정(필요시 ENV로 빼도 됨)
+# 컬렉션 이름 
 _INTERNAL_IDX = ChromaHybridIndex("cohobby_internal")  # 내부 데이터
+_DISPUTE_IDX = ChromaHybridIndex("cohobby_dispute")    # 분쟁 사례 데이터
 
 async def retrieve_internal(query: str, top_k=10) -> List[Dict[str, Any]]:
 
@@ -43,29 +44,49 @@ async def retrieve_internal(query: str, top_k=10) -> List[Dict[str, Any]]:
         d["source"] = "internal"
     return uniq
 
-
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
 async def retrieve_external_web(query: str):
     res = await asyncio.to_thread(tavily_client.search, query, max_results=5)
     return [
-        {"title": r["title"], "content": r["content"], "url": r["url"]}
+        {"title": r["title"], "content": r["content"], "url": r["url"], "source": "web", "score":r.get("score", 0.5)}
         for r in res["results"]
     ]
 
-# [신규] 판매가/중고가 검색 툴
-async def retrieve_sale_price_web(query: str):
-    """'판매가/중고가' 중심으로 웹 검색 (쿼리 수정 로직 제거)"""
-    
-    # [수정] 쿼리 생성은 graph_pipeline의 _build_sale_query가 담당
-    # sale_query = query.replace("대여", "")... (이 로직 삭제)
-    
-    print(f"[Graph] Fallback Sale RAG: Querying '{query}'") # 받은 쿼리 그대로 사용
-    
+# 중고가 검색 툴
+async def retrieve_used_price_web(query: str):
+    """'중고가' 중심으로 웹 검색 """    
+    print(f"[Graph] Fallback Sale RAG: Querying '{query}'") 
     res = await asyncio.to_thread(
         tavily_client.search, 
-        query, # 받은 쿼리 그대로 사용
+        query,
         max_results=5,
+        include_domains = [
+            "bunjae.com",
+            "joongnara.co.kr",
+            "daangn.com"
+        ]
+    )
+    return [
+        {"title": r["title"], "content": r["content"], "url": r["url"]}
+        for r in res.get("results", [])
+    ]
+    
+# 중고가 검색 툴    
+async def retrieve_sale_price_web(query: str):
+    """'판매가' 중심으로 웹 검색"""
+    print(f"[Graph] Fallback Sale RAG: Querying '{query}'")     
+    res = await asyncio.to_thread(
+        tavily_client.search, 
+        query,
+        max_results=5,
+        include_domains = [
+            "coupang.com",
+            "smartstore.naver.com",
+            "11st.co.kr",
+            "ssg.com",
+            "gmarket.co.kr"
+        ]
     )
     return [
         {"title": r["title"], "content": r["content"], "url": r["url"]}
@@ -85,3 +106,6 @@ def merge_evidence(internal: List[Dict], web: List[Dict], top_k: int = 8) -> Lis
     uniq.sort(key=lambda x: x.get("score") or 0.0, reverse=True)
     return uniq[:top_k]
 
+async def retrieve_dispute_cases(query: str, top_k=5) -> List[Dict[str, Any]]:
+    cands = await asyncio.to_thread(_DISPUTE_IDX.search, query=query, top_k=top_k)
+    return cands

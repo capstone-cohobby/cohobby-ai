@@ -6,7 +6,9 @@ import chromadb
 from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 from rapidfuzz import fuzz
 import chromadb.api.client
+from langchain_text_splitters import RecursiveCharacterTextSplitter 
 
+## ---- 공통 설정 ------
 
 def get_embedder():
     return OpenAIEmbeddingFunction(
@@ -23,14 +25,16 @@ def get_client() -> chromadb.api.client.ClientAPI:
     os.makedirs(dbdir, exist_ok=True)
     return chromadb.PersistentClient(path=dbdir)
 
+# ------ 1. 기존 상품(가격) 저장용 클래스 -------
 class ChromaHybridIndex:
     """
     Chroma 기반 로컬 벡터 스토어 (+ 간단 fuzzy 보정)
     doc 메타 예: {id, title, snippet, price, source, category, listing_id, ts, ...}
     """
-    def __init__(self, name: str, docs: Optional[List[Dict[str, Any]]] = None):
+    def __init__(self, name: str = "market_items", docs: Optional[List[Dict[str, Any]]] = None):
         self.client = get_client()
         self.ef = get_embedder()
+        # name 으로 market_items 컬렉션 생성
         self.col = self.client.get_or_create_collection(name=name, embedding_function=self.ef)
 
         if docs:
@@ -80,4 +84,101 @@ class ChromaHybridIndex:
             m["score"] = score
             out.append(m)
         out.sort(key=lambda x: x["score"], reverse=True)
+        return out
+
+# ------ 2. 분쟁 조정 사례 저장용 클래스 -------
+class DisputeIndex:
+    """
+    분쟁 조정 사례 데이터용 (규칙 생성/리스크 판단용)
+    """
+    def __init__(self, name:str = "dispute_cases"):
+        self.client = get_client()
+        self.ef = get_embedder()
+        self.col = self.client.get_or_create_collection(name=name, embedding_function=self.ef)
+        
+        # [설정] 텍스트 스플리터 (너무 긴 텍스트를 잘라서 저장)
+        self.splitter = RecursiveCharacterTextSplitter(
+            chunk_size=2000,
+            chunk_overlap=200
+        )
+    
+    def upsert_cases(self, cases: List[Dict[str, Any]]):
+        """
+        PDF에서 파싱된 JSON 리스트를 저장 (자동 청킹 적용)
+        """
+        ids, texts, metas = [], [], []
+        
+        for c in cases:
+            # 1. 저장할 전체 텍스트 구성 (변수명: text_content)
+            text_content = (
+                f"사건명: {c.get('title', '')}\n"
+                f"분쟁상황(개요): {c.get('overview', '')}\n"
+                f"양측주장: {c.get('arguments', '')}\n"
+                f"조정결과(판단): {c.get('judgment', '')}"
+            )
+            
+            # 2. 텍스트가 길면 자르기 (text_content를 split)
+            chunks = self.splitter.split_text(text_content)
+            
+            for i, chunk in enumerate(chunks):
+                # ID 분리: dispute-uuid_0, dispute-uuid_1 ...
+                chunk_id = f"{c.get('id')}_{i}"
+                
+                ids.append(chunk_id)
+                texts.append(chunk)
+                
+                # 메타데이터 복사
+                meta = {
+                    "category": c.get("category", "기타"),
+                    "title": c.get("title", ""),
+                    "parent_id": str(c.get("id")), 
+                    "chunk_index": i
+                }
+                metas.append(meta)
+
+        # 3. 배치 저장 (100개씩 끊어서 업로드)
+        if ids:
+            batch_size = 100
+            for i in range(0, len(ids), batch_size):
+                end_idx = min(i + batch_size, len(ids))
+                self.col.upsert(
+                    ids=ids[i:end_idx], 
+                    documents=texts[i:end_idx], 
+                    metadatas=metas[i:end_idx]
+                )
+        
+    def search_rules(
+        self,
+        query: str,
+        category: Optional[str] = None,
+        top_k: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        RAG 용 검색: 규칙 생성에 필요한 '딕셔너리 리스트'를 반환
+        """
+        where_clause = {}
+        if category:
+            where_clause["category"] = category
+
+        if not where_clause:
+            where_clause = None
+
+        results = self.col.query(
+            query_texts=[query],
+            n_results=top_k,
+            where=where_clause
+        )
+
+        docs = results.get("documents", [[]])[0]
+        metas = results.get("metadatas", [[]])[0]
+        
+        out = []
+        for doc, meta in zip(docs, metas):
+            item = {
+                "content": doc,
+                "source": "dispute",
+                **meta
+            }
+            out.append(item)
+            
         return out

@@ -1,35 +1,32 @@
-# graph_pipeline.py
+# graph.py
 import json
 import asyncio
 from typing import Dict, Any
 
 from langgraph.graph import StateGraph, END
-
+from .chains.adapters import normalize_doc
 # --- 의존성 임포트 ---
 # 1. 상태 정의
-from ..schemas import GraphState, AgentInput
+from .schemas import GraphState, AgentInput
 
 # 2. 조립된 LCEL 체인
-from .judge import (
+from .chains.judge import (
     chain_rag_summarizer, chain_parallel_finalize, chain_derive_rental_price
 )
 
 # 3. 개별 툴
-from ..tools.cache_tools import make_signature, get_verdict, set_verdict
-from ..tools.rag_tools import retrieve_internal, retrieve_external_web, merge_evidence, retrieve_sale_price_web
-
+from .tools.cache_tools import make_signature, get_verdict, set_verdict
+from .tools.rag_tools import retrieve_internal, retrieve_external_web, merge_evidence, retrieve_sale_price_web, retrieve_used_price_web, retrieve_dispute_cases
+from .chains.ls_retrieval_logger import log_retrieval_to_langsmith
 # --- LangGraph 노드(Node) 정의 ---
 
 def enrich_input(state: GraphState) -> GraphState:
     """입력 전처리 및 서명 생성"""
     inp = dict(state["inp"])
-    desc = (inp.get("description") or "").strip()
     tail = []
     if inp.get("condition"): tail.append(f"상태: {inp['condition']}")
     if inp.get("bought_at"): tail.append(f"구입시기: {inp['bought_at']}")
-    if tail:
-        inp["description"] = (desc + "\n" if desc else "") + "\n".join(tail)
-    
+    if inp.get("category"): tail.append(f"카테고리: {inp['category']}")
     state["inp"] = inp
     state["signature"] = make_signature(inp)
     return state
@@ -51,70 +48,112 @@ def check_verdict_cache(state: GraphState) -> GraphState:
 async def _build_rag_query(state: GraphState) -> str:
     inp = state["inp"]
     name = (inp.get("name") or "").strip()
-    desc = (inp.get("description") or "").strip()
     cat = (inp.get("category") or "").strip()
     terms =[]
     if name:
         terms.append(name)
     if cat: terms.append(cat)
-    if desc: terms.append(desc)
     # name/desc에 이미 "대여/렌탈" 류가 없을 때만
-    base = " ".join(x for x in [name, cat, desc] if x).strip()
+    base = " ".join(x for x in [name, cat] if x).strip()
     tail = "대여 렌탈 일일 요금 대여료 보증금"
     q = base if any(t in base for t in ["대여","렌탈","대여료","요금"]) else f"{base} {tail}".strip()
     print(f"[Graph] RAG Query = {q}")  # 쿼리 로깅
+    
     return q
 
 async def _build_sale_query(state: GraphState) -> str:
-    """[신규] '판매' 쿼리 생성기"""
+    """'중고/판매' 쿼리 생성기"""
     inp = state["inp"]
     name = (inp.get("name") or "").strip()
-    # '대여' 대신 '중고 시세' 키워드 사용
-    sale_terms = "중고 시세 가격"
-    q = " ".join([name, sale_terms]).strip()
+    q = " ".join([name]).strip()
     print(f"[Graph] RAG Query = {q}")  # 쿼리 로깅
     return q
 
-async def retrieve_internal_node(state: GraphState) -> GraphState:
-    """내부 RAG 실행"""
-    q = await _build_rag_query(state)
-    state["internal_docs"] = await retrieve_internal(q)
-    print(f"[Graph] Internal RAG: Found {len(state['internal_docs'])} docs")
-    return state
+async def _build_dispute_query(state: GraphState) -> str:
+    """분쟁 조정 사례 쿼리 생성기"""
+    inp = state["inp"]
+    name = (inp.get("name") or "").strip()
+    category = (inp.get("category") or "").strip()
+    q = f"{name} {category} 분쟁 파손 하자".strip()
+    print(f"[Graph] Dispute RAG Query = {q}")  # 쿼리 로깅
+    return q
 
-async def retrieve_web_node(state: GraphState) -> GraphState:
-    """외부 RAG 실행"""
-    q = await _build_rag_query(state)
-    state["web_docs"] = await retrieve_external_web(q)
-    print(f"[Graph] Web RAG: Found {len(state['web_docs'])} docs")
-    return state
+async def retrieve_all_node(state: GraphState) -> GraphState:
+    """
+    [통합 RAG 노드]
+    1. 가격 산정용 (Internal + Web)
+    2. 규칙 생성용 (Dispute)
+    데이터를 한 번에 병렬로 가져오기
+    """
+    print("[Graph] Retrieving ALL Evidence (Internal + Web + Dispute)...")
+    
+    # 1. 쿼리 생성 (목적에 따라 다르게 생성 가능)
+    q_price = await _build_rag_query(state)      # 예: "맥북 프로 대여"
+    q_dispute = await _build_dispute_query(state) # 예: "맥북 프로 디지털가전"
 
-async def retrieve_both_node(state: GraphState) -> GraphState:
-    """RAG 병렬 실행 (Internal + Web)"""
-    print("[Graph] RAG Both (Internal + Web)")
-    q = await _build_rag_query(state)
+    # 2. 3개 채널 병렬 실행
+    # (내부 DB, 외부 웹, 분쟁 DB)
+    task_internal = retrieve_internal(q_price)
+    task_web = retrieve_external_web(q_price)
+    task_dispute = retrieve_dispute_cases(q_dispute)
     
-    # 두 RAG 툴을 동시에 호출
-    internal_task = retrieve_internal(q)
-    web_task = retrieve_external_web(q)
+    internal_docs, web_docs, dispute_docs = await asyncio.gather(
+        task_internal, task_web, task_dispute
+    )
     
-    internal_docs, web_docs = await asyncio.gather(internal_task, web_task)
-    
-    # state에 결과 저장
+    # 3. State에 원본 저장
     state["internal_docs"] = internal_docs
     state["web_docs"] = web_docs
+    state["dispute_evidence"] = dispute_docs # [New] 분쟁 데이터는 따로 저장 (규칙 생성용)
     
-    print(f"[Graph] Internal RAG: Found {len(state['internal_docs'])} docs")
-    print(f"[Graph] Web RAG: Found {len(state['web_docs'])} docs")
-    return state
+    print(f"[Graph] Docs Found -> Internal: {len(internal_docs)}, Web: {len(web_docs)}, Dispute: {len(dispute_docs)}")
 
-async def merge_evidence_node(state: GraphState) -> GraphState:
-    """RAG 증거 병합"""
-    state["evidence"] = merge_evidence(
-        state.get("internal_docs"), 
-        state.get("web_docs")
-    )
-    print(f"[Graph] RAG Merged: Total {len(state['evidence'])} evidences")
+    # -------------------------------------------------------
+    # 4. [중요] 가격 산정용 데이터 정규화 및 병합 (기존 로직 유지)
+    # -------------------------------------------------------
+    # Analyst LLM은 포맷이 통일된 리스트를 원하므로 정규화 필수
+    k = state.get("k", 8)
+    
+    # (1) 정규화 (Internal, Web 문서를 동일한 스키마로 변환)
+    norm_internal = [normalize_doc(d, "internal") for d in (internal_docs or [])]
+    norm_web = [normalize_doc(d, "web") for d in (web_docs or [])]
+    
+    # (2) 병합 (중복 제거 및 점수 기반 정렬)
+    # merge_evidence 함수 내부에서 중복 제거나 정렬을 수행한다고 가정
+    # 만약 merge_evidence가 정규화된 것을 받지 않는다면, 
+    # 기존처럼 raw를 넘기고 내부에서 처리하거나 여기서 합쳐줍니다.
+    # 여기서는 직관적으로 합쳐서 state["evidence"]에 넣습니다.
+    
+    # *참고: merge_evidence 함수가 dict 리스트를 받아 중복제거 후 top_k를 반환한다고 가정
+    merged_price_evidence = merge_evidence(norm_internal,norm_web , top_k=k)
+    state["evidence"] = merged_price_evidence 
+    
+    print(f"[Graph] Price Evidence Merged: {len(state['evidence'])} items")
+
+    # -------------------------------------------------------
+    # 5. [복구] LangSmith 로깅
+    # -------------------------------------------------------
+    # 가격 산정용 데이터(evidence)에 대해서만 로깅을 수행합니다.
+    # (분쟁 데이터는 성격이 달라 리트리버 평가 지표가 다를 수 있으므로 제외하거나 별도 로깅)
+    
+    # 로깅을 위해 정규화된 리스트를 다시 만듦 (merge_evidence가 raw를 반환하는 경우 대비)
+    # 실제 로깅엔 'merged_price_evidence' 내용을 기반으로 넘기는 것이 좋습니다.
+    
+    try:
+        log_retrieval_to_langsmith(
+            query=q_price,
+            docs=merged_price_evidence, # 최종적으로 LLM이 볼 데이터
+            k=k,
+            freshness_days=state.get("freshness_days", 90),
+            metadata={
+                "node": "retrieve_all", 
+                "retriever": "hybrid-triple-source",
+                "dispute_count": len(dispute_docs) # 메타데이터에 분쟁 검색 결과 수 포함
+            },
+        )
+    except Exception as e:
+        print(f"[Graph] Logging Warning: {e}")
+
     return state
 
 async def summarize_rag_evidence(state: GraphState) -> GraphState:
@@ -122,14 +161,14 @@ async def summarize_rag_evidence(state: GraphState) -> GraphState:
     evidence = state.get("evidence")
     if not evidence:
         print("[Graph] RAG Analyst: No evidence to summarize.")
-        state["rag_analysis_report"] = None # [수정] 키 변경
+        state["rag_analysis_report"] = None 
         return state
     
     try:
         # chain_rag_summarizer가 이제 JSON(Dict)을 반환한다고 가정
         analysis_report = await chain_rag_summarizer.ainvoke(evidence)
         
-        # [수정] rag_summary 대신 rag_analysis_report에 저장
+        # -rag_analysis_report에 저장
         state["rag_analysis_report"] = analysis_report
         
         summary_text = "No summary text"
@@ -151,7 +190,8 @@ async def finalize_parallel(state: GraphState) -> GraphState:
         final_inp_dict = dict(state["inp"])
         final_inp_dict["category"] = state["inp"].get("category") 
         final_inp_dict["rag_analysis_report"] = state.get("rag_analysis_report")
-        final_inp_dict["evidence"] = state.get("evidence")
+        final_inp_dict["evidence"] = state.get("evidence",[])
+        final_inp_dict["dispute_evidence"] = state.get("dispute_evidence", [])
         
         # (선택) 하위 호환성을 위해 rag_summary에도 텍스트 요약본 주입
         if isinstance(state.get("rag_analysis_report"), dict):
@@ -183,8 +223,20 @@ async def finalize_parallel(state: GraphState) -> GraphState:
         state["error"] = f"finalize_error: {e}"
     return state
 
+async def retrieve_used_price_node(state: GraphState) -> GraphState:
+    """ 중고가 RAG 실행"""
+    print("[Graph] Fallback: Retrieving Used Price data...")
+    q = await _build_sale_query(state)
+    
+    #  중고가 검색
+    used_docs = await retrieve_used_price_web(q)
+    
+    state["used_evidence"] = used_docs
+    print(f"[Graph] Fallback Used RAG: Found {len(used_docs)} docs")
+    return state
+
 async def retrieve_sale_price_node(state: GraphState) -> GraphState:
-    """[신규] 판매가 RAG 실행"""
+    """ 판매가 RAG 실행"""
     print("[Graph] Fallback: Retrieving Sale Price data...")
     q = await _build_sale_query(state)
     
@@ -196,27 +248,23 @@ async def retrieve_sale_price_node(state: GraphState) -> GraphState:
     return state
 
 async def derive_rental_price_node(state: GraphState) -> GraphState:
-    """[신규] 판매가 기반 대여가 추론 LLM 호출"""
+    """ 판매가 기반 대여가 추론 LLM 호출"""
     print("[Graph] Fallback: Invoking Deriver LLM...")
-    
-    if not state.get("sale_evidence"):
-        print("[Graph] Fallback: No sale evidence found. Skipping deriver.")
-        # 추론 실패 시 기존의 'uncertain' 결정이 유지됨
-        return state
 
     try:
         # [수정] chain_derive_rental_price는 state 딕셔너리의 일부를 입력받음
         deriver_input = {
             "inp": state.get("inp"),
-            "sale_evidence": state.get("sale_evidence")
+            "sale_evidence": state.get("sale_evidence"),
+            "used_evidence": state.get("used_evidence", []),
         }
         derived_price_decision = await chain_derive_rental_price.ainvoke(deriver_input)
         
-        # [수정] 기존 PriceDecision을 덮어쓰기
+        # 기존 PriceDecision을 덮어쓰기
         state["price_decision"] = derived_price_decision
         print("[Graph] Fallback Deriver: Price OK (Overwritten)")
         
-        # [신규] 최종 결정된 가격을 캐시에 저장
+        # 최종 결정된 가격을 캐시에 저장
         set_verdict(state["signature"], derived_price_decision)
         print("[Cache] SET OK (Derived):", state["signature"])
         
@@ -227,12 +275,24 @@ async def derive_rental_price_node(state: GraphState) -> GraphState:
         
     return state
 
+async def retrieve_dispute_cases_node(state: GraphState) -> GraphState:
+    """ 분쟁 조정 사례 RAG 실행"""
+    print("[Graph] Retrieving Dispute Cases...")
+    q = await _build_dispute_query(state)
+    
+    # 분쟁 조정 사례 검색
+    dispute_docs = await retrieve_dispute_cases(q)
+    
+    state["dispute_evidence"] = dispute_docs
+    print(f"[Graph] Dispute Cases RAG: Found {len(dispute_docs)} docs")
+    return state
+
 # --- LangGraph 엣지(Edge) / 게이트(Gate) 정의 ---
 def gate_after_cache(state: GraphState) -> str:
     """캐시 히트 여부 분기"""
     if state.get("cache_hit"):
         return "finalize_parallel"
-    return "retrieve_both"  # 캐시 미스 시 RAG 수행
+    return "retrieve_all"  # 캐시 미스 시 RAG 수행
 
 # [신규] 가격 결정 후 Fallback 여부 분기
 def gate_after_price(state: GraphState) -> str:
@@ -256,8 +316,7 @@ graph = StateGraph(GraphState)
 # --- [수정] 1. 노드 추가 (먼저 정의) ---
 graph.add_node("enrich_input", enrich_input)
 graph.add_node("check_verdict_cache", check_verdict_cache)
-graph.add_node("retrieve_both", retrieve_both_node) 
-graph.add_node("merge_evidence", merge_evidence_node)
+graph.add_node("retrieve_all", retrieve_all_node) 
 graph.add_node("summarize_rag_evidence", summarize_rag_evidence)
 graph.add_node("finalize_parallel", finalize_parallel)
 graph.add_node("retrieve_sale_price_node", retrieve_sale_price_node)
@@ -270,14 +329,13 @@ graph.add_edge("enrich_input", "check_verdict_cache")
 # 1. 캐시 분기 
 graph.add_conditional_edges("check_verdict_cache", gate_after_cache, {
     "finalize_parallel": "finalize_parallel", # 캐시 히트 시
-    "retrieve_both": "retrieve_both"  # 캐시 미스 시
+    "retrieve_all": "retrieve_all"  # 캐시 미스 시
 })
 
 # 2.  RAG 
-graph.add_edge("retrieve_both", "merge_evidence")
+graph.add_edge("retrieve_all", "summarize_rag_evidence")
 
 #3. Merge Evidence -> RAG Summarizer
-graph.add_edge("merge_evidence", "summarize_rag_evidence")
 graph.add_edge("summarize_rag_evidence", "finalize_parallel")
 
 # 4. [신규] 최종 결정 후 Fallback 분기
@@ -294,7 +352,7 @@ app_graph = graph.compile()
 # --- 실행 헬퍼 ---
 async def run_once(payload: Dict[str, Any]) -> Dict[str, Any]:
     state: GraphState = {"inp": payload}
-    final_state = await app.ainvoke(state)
+    final_state = await app_graph.ainvoke(state)
     
     print("\n--- Final State ---")
     # Pydantic 모델을 dict로 변환하여 출력
@@ -310,6 +368,7 @@ async def run_once(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
     return output
 
+## 예시 실행
 if __name__ == "__main__":
     sample = {
         "name": "exo 응원봉",
