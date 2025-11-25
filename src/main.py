@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # 스키마
 from hosts.agent.schemas import AgentInput ,EstimationResponse
 
-from src.hosts.agent.graph_pipeline import app_graph
+from src.hosts.agent.graph import app_graph
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,9 +49,9 @@ async def estimate_price(payload: AgentInput):
         # 그래프 실행
         state = await app_graph.ainvoke({"inp": payload.model_dump()})
         return EstimationResponse(
-            price=state.get("price_decision"),
-            deposit=state.get("deposit_decision"),
-            rules=state.get("rules_decision"),
+            price=state.get("price_decision").model_dump(),
+            deposit=state.get("deposit_decision").model_dump(),
+            rules=state.get("rules_decision").model_dump(),
             cache_hit=state.get("cache_hit", False),
             error=state.get("error"),
             evidence=state.get("evidence", []),

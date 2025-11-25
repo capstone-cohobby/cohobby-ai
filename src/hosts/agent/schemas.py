@@ -8,7 +8,6 @@ InfoNeed = Literal["none", "low", "medium", "high"]
 # ─────────────────────────────────────────────────────────────
 class AgentInput(BaseModel):
     name: str
-    description: Optional[str] = None
     category: Optional[str] = None
     condition: Optional[str] = None
     bought_at: Optional[str] = None
@@ -17,16 +16,8 @@ class AgentInput(BaseModel):
     rag_summary: Optional[str] = Field(None, description="RAG 검색 결과 요약")
     batch_summary: Optional[Dict[str, Any]] = Field(None, description="S3 배치 요약 결과")
     rag_analysis_report: Optional[Dict[str, Any]] = Field(None, description="RAG 분석 리포트")
-    evidence: Optional[List[Dict[str, Any]]] = Field(None, description="[신규] 요약 전 원본 RAG 증거 목록")
-
-# ─────────────────────────────────────────────────────────────
-# 1) Probe(1차) 출력
-# ─────────────────────────────────────────────────────────────
-class ProbeOutput(BaseModel):
-    """Probe 체인의 출력"""
-    category: Optional[str] = "unknown"
-    info_need: Literal["none", "low", "medium", "high"] = "low"
-    reasoning: Optional[str] = None
+    evidence: Optional[List[Dict[str, Any]]] = Field(None, description=" 요약 전 시장 데이터 원본 RAG 증거 목록")
+    dispute_evidence: Optional[List[Dict[str, Any]]] = Field(None, description="분쟁 사례 리스트 (RAG 증거)")
 
 class PriceEstimate(BaseModel):
     point: Optional[float] = None
@@ -52,6 +43,12 @@ class PriceDecision(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     reasoning: Optional[str] = None
     price: PriceEstimate
+    
+    # Fallback 추론의 근거가 된 가격과 출처
+    reference_price: Optional[float] = Field(None, description="참조한 판매가 또는 중고가")
+    reference_type: Optional[Literal["new", "used"]] = Field(None, description="참조 가격의 유형 (신품/중고)")
+    reference_url: Optional[str] = Field(None, description="참조한 가격 정보의 출처 URL")
+    
     @model_validator(mode="after")
     def _coherence(self):
         if self.decision == "reasonable" and self.confidence < 0.6:

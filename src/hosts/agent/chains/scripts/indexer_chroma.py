@@ -118,7 +118,7 @@ def main():
                 "model": rec["model"],
             })
 
-    n_int += 1
+        n_int += 1
 
     if len(batch_int) >= 500:
         idx_internal.upsert_docs(batch_int)
