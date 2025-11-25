@@ -19,5 +19,6 @@ RUN poetry config virtualenvs.create false \
 FROM deps AS agent
 WORKDIR /app
 COPY src /app/src
+ENV PYTHONPATH=/app
 EXPOSE 8080
-CMD ["python", "-m", "src/main"]
+CMD ["python", "-m", "src.main"]
