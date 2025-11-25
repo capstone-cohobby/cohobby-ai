@@ -20,4 +20,4 @@ FROM deps AS agent
 WORKDIR /app
 COPY src /app/src
 EXPOSE 8080
-CMD ["python", "src/main.py"]
+CMD ["python", "-m", "src/main.py"]
