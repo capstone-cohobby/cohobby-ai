@@ -60,7 +60,7 @@ async def retrieve_used_price_web(query: str):
     res = await asyncio.to_thread(
         tavily_client.search, 
         query,
-        max_results=5,
+        max_results=3,
         include_domains = [
             "bunjae.com",
             "joongnara.co.kr",
@@ -79,7 +79,7 @@ async def retrieve_sale_price_web(query: str):
     res = await asyncio.to_thread(
         tavily_client.search, 
         query,
-        max_results=5,
+        max_results=3,
         include_domains = [
             "coupang.com",
             "smartstore.naver.com",

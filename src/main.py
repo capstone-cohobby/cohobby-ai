@@ -48,10 +48,39 @@ async def estimate_price(payload: AgentInput):
     try:
         # 그래프 실행
         state = await app_graph.ainvoke({"inp": payload.model_dump()})
+        
+        # [수정] Pydantic 모델 안전하게 덤프하기 (None 체크)
+        # 1. Price
+        price_res = None
+        if state.get("price_decision"):
+            price_res = state.get("price_decision").model_dump()
+        
+        # 2. Deposit (Finalize 실패 시 없을 수 있음 -> 기본값 제공)
+        deposit_res = None
+        if state.get("deposit_decision"):
+            deposit_res = state.get("deposit_decision").model_dump()
+        else:
+            # ★ 비상용 기본값 (Fallback)
+            deposit_res = {
+                "deposit_amount": 0,
+                "reasoning": "시스템 에러로 인해 보증금 정책을 산정하지 못했습니다."
+            }
+
+        # 3. Rules (Finalize 실패 시 없을 수 있음 -> 기본값 제공)
+        rules_res = None
+        if state.get("rules_decision"):
+            rules_res = state.get("rules_decision").model_dump()
+        else:
+            # ★ 비상용 기본값 (Fallback)
+            rules_res = {
+                "rules": ["물품 파손 시 실비 청구", "기본 대여 약관 준수"],
+                "reasoning": "시스템 에러로 인해 상세 규칙을 생성하지 못했습니다."
+            }
+        
         return EstimationResponse(
-            price=state.get("price_decision").model_dump(),
-            deposit=state.get("deposit_decision").model_dump(),
-            rules=state.get("rules_decision").model_dump(),
+            price=price_res,
+            deposit=deposit_res,
+            rules=rules_res,
             cache_hit=state.get("cache_hit", False),
             error=state.get("error"),
             evidence=state.get("evidence", []),

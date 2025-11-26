@@ -82,31 +82,35 @@ async def retrieve_all_node(state: GraphState) -> GraphState:
     """
     [통합 RAG 노드]
     1. 가격 산정용 (Internal + Web)
-    2. 규칙 생성용 (Dispute)
+    2. 보증금 산정용 (Used Price - 중고가)
+    3. 규칙 생성용 (Dispute)
     데이터를 한 번에 병렬로 가져오기
     """
-    print("[Graph] Retrieving ALL Evidence (Internal + Web + Dispute)...")
+    print("[Graph] Retrieving ALL Evidence (Internal + Web + Used + Dispute)...")
     
     # 1. 쿼리 생성 (목적에 따라 다르게 생성 가능)
     q_price = await _build_rag_query(state)      # 예: "맥북 프로 대여"
+    q_sale = await _build_sale_query(state)      # 예: "맥북 프로" (중고가 검색용)
     q_dispute = await _build_dispute_query(state) # 예: "맥북 프로 디지털가전"
 
-    # 2. 3개 채널 병렬 실행
-    # (내부 DB, 외부 웹, 분쟁 DB)
+    # 2. 4개 채널 병렬 실행
+    # (내부 DB, 외부 웹, 중고가, 분쟁 DB)
     task_internal = retrieve_internal(q_price)
     task_web = retrieve_external_web(q_price)
+    task_used = retrieve_used_price_web(q_sale)  # [신규] 중고가 검색 추가
     task_dispute = retrieve_dispute_cases(q_dispute)
     
-    internal_docs, web_docs, dispute_docs = await asyncio.gather(
-        task_internal, task_web, task_dispute
+    internal_docs, web_docs, used_docs, dispute_docs = await asyncio.gather(
+        task_internal, task_web, task_used, task_dispute
     )
     
     # 3. State에 원본 저장
     state["internal_docs"] = internal_docs
     state["web_docs"] = web_docs
-    state["dispute_evidence"] = dispute_docs # [New] 분쟁 데이터는 따로 저장 (규칙 생성용)
+    state["used_evidence"] = used_docs  # [신규] 중고가 데이터 저장 (보증금 산정용)
+    state["dispute_evidence"] = dispute_docs # 분쟁 데이터는 따로 저장 (규칙 생성용)
     
-    print(f"[Graph] Docs Found -> Internal: {len(internal_docs)}, Web: {len(web_docs)}, Dispute: {len(dispute_docs)}")
+    print(f"[Graph] Docs Found -> Internal: {len(internal_docs)}, Web: {len(web_docs)}, Used: {len(used_docs)}, Dispute: {len(dispute_docs)}")
 
     # -------------------------------------------------------
     # 4. [중요] 가격 산정용 데이터 정규화 및 병합 (기존 로직 유지)
@@ -197,13 +201,16 @@ async def finalize_parallel(state: GraphState) -> GraphState:
         final_inp_dict["rag_analysis_report"] = state.get("rag_analysis_report")
         final_inp_dict["evidence"] = state.get("evidence", [])
         
-        # [수정] dispute_evidence를 리스트로 직접 전달 (dispute_evidence_str 제거)
+        # [수정] dispute_evidence와 used_evidence를 리스트로 직접 전달
         dispute_list = state.get("dispute_evidence", [])
+        used_list = state.get("used_evidence", [])
         final_inp_dict["dispute_evidence"] = dispute_list
+        final_inp_dict["used_evidence"] = used_list  # [신규] 중고가 정보 추가
         
         # [검증] 전달되는 데이터 확인
         print(f"[Graph] Finalize Parallel: Preparing AgentInput...")
         print(f"[Graph] Finalize Parallel: - evidence count: {len(final_inp_dict.get('evidence', []))}")
+        print(f"[Graph] Finalize Parallel: - used_evidence count: {len(used_list)}")
         print(f"[Graph] Finalize Parallel: - dispute_evidence count: {len(dispute_list)}")
         print(f"[Graph] Finalize Parallel: - rag_analysis_report: {bool(final_inp_dict.get('rag_analysis_report'))}")
         
@@ -216,29 +223,102 @@ async def finalize_parallel(state: GraphState) -> GraphState:
         ai = AgentInput(**final_inp_dict)
         print(f"[Graph] Finalize Parallel: AgentInput created successfully")
 
-        # 2. 병렬 체인 호출 (Pydantic In -> Dict[str, Pydantic] Out)
-        print("[Graph] Finalize Parallel: Invoking Price, Deposit, Rules...")
-        parallel_results = await chain_parallel_finalize.ainvoke(ai)
-
-        # 3. Pydantic 모델을 State에 저장
-        price_decision = parallel_results.get("price")
-        if price_decision:
-            state["price_decision"] = price_decision
-            # 가격 결정만 캐시
-            set_verdict(state["signature"], price_decision)
-            print("[Graph] Finalize Parallel: Price OK")
-
-        state["deposit_decision"] = parallel_results.get("deposit")
-        print("[Graph] Finalize Parallel: Deposit OK")
+        # 2. 병렬 체인 호출 (각 체인을 독립적으로 실행하여 하나가 실패해도 다른 것은 성공하도록)
+        print("[Graph] Finalize Parallel: Invoking Price, Deposit, Rules (independently with error isolation)...")
         
-        state["rules_decision"] = parallel_results.get("rules")
-        print("[Graph] Finalize Parallel: Rules OK")
+        # 각 체인을 병렬로 실행하되, 각각을 try-catch로 감싸서 에러 격리
+        from .chains.judge import chain_price, chain_deposit, chain_rules
+        from .schemas import DepositDecision, RulesDecision
+        
+        async def run_price_chain():
+            try:
+                return await chain_price.ainvoke(ai)
+            except Exception as e:
+                print(f"[Graph] Finalize Parallel: Price ERROR - {e}")
+                import traceback
+                print(f"[Graph] Finalize Parallel: Price ERROR Traceback: {traceback.format_exc()}")
+                return None
+        
+        async def run_deposit_chain():
+            try:
+                return await chain_deposit.ainvoke(ai)
+            except Exception as e:
+                print(f"[Graph] Finalize Parallel: Deposit ERROR - {e}")
+                import traceback
+                print(f"[Graph] Finalize Parallel: Deposit ERROR Traceback: {traceback.format_exc()}")
+                # 기본값 반환
+                return DepositDecision(
+                    deposit_amount=0,
+                    reasoning=f"보증금 산정 중 오류 발생: {str(e)[:200]}"
+                )
+        
+        async def run_rules_chain():
+            try:
+                return await chain_rules.ainvoke(ai)
+            except Exception as e:
+                print(f"[Graph] Finalize Parallel: Rules ERROR - {e}")
+                import traceback
+                print(f"[Graph] Finalize Parallel: Rules ERROR Traceback: {traceback.format_exc()}")
+                # 기본값 반환
+                return RulesDecision(
+                    rules=["물품 파손 시 실비 청구", "기본 대여 약관 준수"],
+                    reasoning=f"규칙 생성 중 오류 발생: {str(e)[:200]}"
+                )
+        
+        # 병렬 실행 (하나가 실패해도 다른 것은 계속 실행)
+        price_result, deposit_result, rules_result = await asyncio.gather(
+            run_price_chain(),
+            run_deposit_chain(),
+            run_rules_chain(),
+            return_exceptions=False  # 각 함수 내부에서 이미 에러 처리
+        )
+        
+        # 결과 저장
+        if price_result:
+            state["price_decision"] = price_result
+            set_verdict(state["signature"], price_result)
+            print("[Graph] Finalize Parallel: Price OK")
+        else:
+            print("[Graph] Finalize Parallel: WARNING - price_decision is None")
+        
+        if deposit_result:
+            state["deposit_decision"] = deposit_result
+            print(f"[Graph] Finalize Parallel: Deposit OK - amount={deposit_result.deposit_amount}")
+        else:
+            print("[Graph] Finalize Parallel: ERROR - deposit_decision is None!")
+            state["deposit_decision"] = DepositDecision(
+                deposit_amount=0,
+                reasoning="보증금 산정 중 오류가 발생했습니다."
+            )
+        
+        if rules_result:
+            state["rules_decision"] = rules_result
+            print(f"[Graph] Finalize Parallel: Rules OK - rules count={len(rules_result.rules)}")
+        else:
+            print("[Graph] Finalize Parallel: ERROR - rules_decision is None!")
+            state["rules_decision"] = RulesDecision(
+                rules=["물품 파손 시 실비 청구", "기본 대여 약관 준수"],
+                reasoning="규칙 생성 중 오류가 발생했습니다."
+            )
         
     except Exception as e:
         print(f"[Graph] Finalize Parallel ERROR: {e}")
         import traceback
         print(f"[Graph] Finalize Parallel ERROR Traceback: {traceback.format_exc()}")
         state["error"] = f"finalize_error: {e}"
+        
+        # 에러 발생 시에도 기본값 제공
+        from .schemas import DepositDecision, RulesDecision
+        if "deposit_decision" not in state or state.get("deposit_decision") is None:
+            state["deposit_decision"] = DepositDecision(
+                deposit_amount=0,
+                reasoning=f"보증금 산정 중 오류 발생: {str(e)[:200]}"
+            )
+        if "rules_decision" not in state or state.get("rules_decision") is None:
+            state["rules_decision"] = RulesDecision(
+                rules=["물품 파손 시 실비 청구", "기본 대여 약관 준수"],
+                reasoning=f"규칙 생성 중 오류 발생: {str(e)[:200]}"
+            )
     return state
 
 async def retrieve_used_price_node(state: GraphState) -> GraphState:
@@ -276,19 +356,27 @@ async def derive_rental_price_node(state: GraphState) -> GraphState:
         print(f"[Graph] Fallback Deriver: First sale_evidence sample - {str(sale_docs[0])[:150]}...")
     else:
         print("[Graph] Fallback Deriver: WARNING - No sale_evidence found!")
+    
+    # [신규] used_evidence도 확인 (retrieve_all_node에서 이미 검색됨)
+    used_docs = state.get("used_evidence", [])
+    print(f"[Graph] Fallback Deriver: used_evidence count={len(used_docs)} (from retrieve_all_node)")
+    if used_docs:
+        print(f"[Graph] Fallback Deriver: First used_evidence sample - {str(used_docs[0])[:150]}...")
 
     try:
         # [수정] chain_derive_rental_price는 _prepare_deriver_input을 사용하므로
-        # state dict를 직접 전달해야 함 (inp와 sale_evidence가 포함된 dict)
-        # _prepare_deriver_input이 state_dict에서 inp와 sale_evidence를 추출하여
-        # user_json과 sale_evidence_str로 변환함
+        # state dict를 직접 전달해야 함 (inp, sale_evidence, used_evidence가 포함된 dict)
+        # _prepare_deriver_input이 state_dict에서 inp, sale_evidence, used_evidence를 추출하여
+        # user_json, sale_evidence_str, used_evidence_str로 변환함
         state_dict = {
             "inp": state.get("inp", {}),
-            "sale_evidence": sale_docs
+            "sale_evidence": sale_docs,
+            "used_evidence": used_docs  # [신규] Fallback 경로에서도 used_evidence 전달
         }
         
         print(f"[Graph] Fallback Deriver: Preparing input with inp keys={list(state_dict.get('inp', {}).keys())}")
         print(f"[Graph] Fallback Deriver: sale_evidence items={len(state_dict.get('sale_evidence', []))}")
+        print(f"[Graph] Fallback Deriver: used_evidence items={len(state_dict.get('used_evidence', []))}")
         
         # 체인 호출 (state_dict를 전달하면 _prepare_deriver_input이 처리)
         derived_price_decision = await chain_derive_rental_price.ainvoke(state_dict)
@@ -425,7 +513,6 @@ async def run_once(payload: Dict[str, Any]) -> Dict[str, Any]:
     else:
         # ★ 비상용 기본값 (Fallback)
         deposit_res = {
-            "deposit_required": False,
             "deposit_amount": 0,
             "reasoning": "시스템 에러로 인해 보증금 정책을 산정하지 못했습니다."
         }

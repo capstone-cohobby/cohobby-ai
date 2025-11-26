@@ -178,9 +178,9 @@ def _format_evidence_list_to_string(evidence_list: List[Dict[str, Any]]) -> Dict
     return {"source": "\n\n".join(formatted_summaries)}
 
 def _prepare_price_input(ai: AgentInput) -> Dict[str, str]:
-    """[Price] 가격 결정 체인용 입력: User Info + Analyst Report + Raw Evidence"""
-    # 1. 사용자 입력 (상품명, 상태 등)
-    user_data = ai.model_dump_json(exclude={"evidence", "rag_analysis_report", "rag_summary"})
+    """[Price] 가격 결정 체인용 입력: User Info + Analyst Report + Raw Evidence (대여 시장만)"""
+    # 1. 사용자 입력 (상품명, 상태 등) - 불필요한 evidence 제외
+    user_data = ai.model_dump_json(exclude={"evidence", "used_evidence", "dispute_evidence", "rag_analysis_report", "rag_summary"})
     
     # 2. RAG 분석가 리포트
     report = ai.rag_analysis_report or {}
@@ -189,15 +189,47 @@ def _prepare_price_input(ai: AgentInput) -> Dict[str, str]:
     else:
         report_str = str(report)
         
-    # 3. 원본 증거 (혹시 프롬프트에서 필요하다면)
+    # 3. 원본 증거 (대여 시장만 - used_evidence 제외 확인 및 필터링)
     # evidence 리스트를 문자열로 변환
     ev_list = ai.evidence or []
+    
+    # [중요] used_evidence가 섞여 있는지 확인하고 제거
+    used_list = getattr(ai, "used_evidence", None) or []
+    if used_list and ev_list:
+        # used_evidence의 URL/ID를 수집하여 evidence에서 제외
+        used_urls = {doc.get("url", "") for doc in used_list if doc.get("url")}
+        used_ids = {doc.get("id", "") for doc in used_list if doc.get("id")}
+        used_titles = {doc.get("title", "") for doc in used_list if doc.get("title")}
+        
+        # evidence에서 used_evidence와 겹치는 항목 제거
+        filtered_ev_list = []
+        removed_count = 0
+        for doc in ev_list:
+            doc_url = doc.get("url", "")
+            doc_id = doc.get("id", "")
+            doc_title = doc.get("title", "")
+            
+            # used_evidence와 겹치지 않는 경우만 포함
+            if (doc_url not in used_urls and 
+                doc_id not in used_ids and 
+                doc_title not in used_titles):
+                filtered_ev_list.append(doc)
+            else:
+                removed_count += 1
+        
+        if removed_count > 0:
+            print(f"[Chain] Price Input: Removed {removed_count} items from evidence that overlap with used_evidence")
+            ev_list = filtered_ev_list
+    
     evidence_str = _format_evidence_list_to_string(ev_list).get("source")
     
     # [검증] Price 체인에 전달되는 데이터 확인
-    print(f"[Chain] Price Input: evidence count={len(ev_list)}, report exists={bool(report)}")
+    print(f"[Chain] Price Input: evidence count={len(ev_list)}, used_evidence count={len(used_list)}, report exists={bool(report)}")
     if ev_list:
         print(f"[Chain] Price Input: First evidence sample - {str(ev_list[0])[:100]}...")
+        # evidence의 source 확인 (대여 시장만 있어야 함)
+        ev_sources = {doc.get("source", "unknown") for doc in ev_list}
+        print(f"[Chain] Price Input: Evidence sources: {ev_sources}")
 
     return {
         "user_json": user_data,
@@ -205,26 +237,70 @@ def _prepare_price_input(ai: AgentInput) -> Dict[str, str]:
         "evidence_str": evidence_str       # 원본 증거
     }
 
-# [신규 Helper] 각 LLM에게 필요한 정보만 골라주는 포매터
-def _prepare_deposit_rules_input(ai_input: AgentInput) -> Dict[str, str]:
+# [신규 Helper] Deposit 체인용 입력 포매터
+def _prepare_deposit_input(ai_input: AgentInput) -> Dict[str, str]:
+    """AgentInput에서 중고가 정보만 꺼내 문자열로 변환 (분쟁 사례 제외 - 토큰 절약)"""
+    user_json = ai_input.model_dump_json(exclude={"evidence", "used_evidence", "dispute_evidence","rag_analysis_report","rag_summary"})
+    
+    # used_evidence 필드에서 중고가 정보만 가져옴 (분쟁 사례 제외)
+    used_list = getattr(ai_input, "used_evidence", None) or []
+    
+    # [검증] Deposit 체인에 전달되는 데이터 확인
+    print(f"[Chain] Deposit Input: used_evidence count={len(used_list)}")
+    if used_list:
+        print(f"[Chain] Deposit Input: First used_evidence sample - {str(used_list[0])[:100]}...")
+    
+    # 중고가 정보 포매팅
+    if not used_list:
+        used_price_str = "검색된 중고가 정보가 없습니다."
+    else:
+        formatted_used = _format_evidence_list_to_string(used_list)
+        used_price_str = formatted_used.get("source","")
+        print(f"[Chain] Deposit Input: Formatted used_price_str length={len(used_price_str)}")
+    
+    return {
+        "user_json": user_json,
+        "used_price_evidence_str": used_price_str
+    }
+
+# [신규 Helper] Rules 체인용 입력 포매터 (기존 유지)
+def _prepare_rules_input(ai_input: AgentInput) -> Dict[str, str]:
     """AgentInput에서 분쟁 사례 리스트를 꺼내 문자열로 변환"""
-    user_json = ai_input.model_dump_json(exclude={"evidence", "dispute_evidence","rag_analysis_report","rag_summary"})
+    user_json = ai_input.model_dump_json(exclude={"evidence", "used_evidence", "dispute_evidence","rag_analysis_report","rag_summary"})
     
     # dispute_evidence 필드에서 분쟁 사례 리스트를 가져옴
     dispute_list = getattr(ai_input, "dispute_evidence", None) or []
     
-    # [검증] Deposit/Rules 체인에 전달되는 데이터 확인
-    print(f"[Chain] Deposit/Rules Input: dispute_evidence count={len(dispute_list)}")
+    # [검증] Rules 체인에 전달되는 데이터 확인
+    print(f"[Chain] Rules Input: dispute_evidence count={len(dispute_list)}")
     if dispute_list:
-        print(f"[Chain] Deposit/Rules Input: First dispute sample - {str(dispute_list[0])[:100]}...")
+        print(f"[Chain] Rules Input: First dispute sample - {str(dispute_list[0])[:100]}...")
     
-    # 포매팅 재활용
+    # 포매팅 재활용 (토큰 절약: 상위 3개만 사용, 본문 300자로 제한)
     if not dispute_list:
         dispute_str = "검색된 유사 분쟁 사례가 없습니다. 일반적인 안전 수칙을 제안해 주세요."
     else:
-        formatted_data = _format_evidence_list_to_string(dispute_list)
+        # 상위 3개만 사용하고 본문을 300자로 제한
+        limited_dispute = dispute_list[:3]
+        formatted_data = _format_evidence_list_to_string(limited_dispute)
+        # 본문을 더 짧게 만들기 위해 추가 처리
         dispute_str = formatted_data.get("source","")
-        print(f"[Chain] Deposit/Rules Input: Formatted dispute_str length={len(dispute_str)}")
+        # 각 문서의 본문을 300자로 제한 (이미 _format_evidence_list_to_string에서 500자로 제한되어 있지만, 더 줄이기)
+        lines = dispute_str.split("\n\n")
+        shortened_lines = []
+        for line in lines:
+            if "본문:" in line:
+                # 본문 부분만 300자로 제한
+                parts = line.split("본문:")
+                if len(parts) == 2:
+                    body = parts[1].strip()[:300]
+                    shortened_lines.append(parts[0] + "본문: " + body)
+                else:
+                    shortened_lines.append(line)
+            else:
+                shortened_lines.append(line)
+        dispute_str = "\n\n".join(shortened_lines)
+        print(f"[Chain] Rules Input: Formatted dispute_str length={len(dispute_str)} (limited to top 3, 300 chars per body)")
     
     return {
         "user_json": user_json,
@@ -240,10 +316,13 @@ agent_input_to_json_str = (
 )
 
 # [Helper] LLM 출력(AIMessage)을 Pydantic 모델로 변환 (파서 사용)
-def create_pydantic_output_parser(pydantic_model: Any):
+def create_pydantic_output_parser(pydantic_model: Any, chain_name: str = "Unknown"):
+    """Pydantic 모델 파서 생성 (체인 이름을 받아 로깅에 사용)"""
     def extract_and_parse(msg):
         """JSON 추출 및 파싱 (에러 핸들링 포함)"""
         try:
+            print(f"[Chain][{chain_name}] Starting JSON extraction and parsing...")
+            
             # 0. 응답이 잘렸는지 확인 (finish_reason 체크)
             finish_reason = getattr(msg, "response_metadata", {}).get("finish_reason") if hasattr(msg, "response_metadata") else None
             if not finish_reason:
@@ -251,107 +330,116 @@ def create_pydantic_output_parser(pydantic_model: Any):
                 finish_reason = getattr(msg, "finish_reason", None)
             
             if finish_reason and finish_reason in ["length", "max_tokens"]:
-                print(f"[Chain] WARNING: Response was truncated! finish_reason={finish_reason}")
-                print(f"[Chain] This may cause incomplete JSON. Consider increasing max_tokens.")
+                print(f"[Chain][{chain_name}] WARNING: Response was truncated! finish_reason={finish_reason}")
+                print(f"[Chain][{chain_name}] This may cause incomplete JSON. Consider increasing max_tokens.")
             
             # 1. JSON 문자열 추출
             content = getattr(msg, "content", None)
             content_str = str(content) if content else ""
-            print(f"[Chain] Original content length: {len(content_str)}")
+            print(f"[Chain][{chain_name}] Original content length: {len(content_str)}")
             
             # content가 비어있을 때 추가 정보 확인
             if not content_str or len(content_str.strip()) == 0:
-                print(f"[Chain] WARNING: Content is empty!")
+                print(f"[Chain][{chain_name}] ERROR: Content is empty!")
                 # tool_calls 확인
                 tool_calls = getattr(msg, "tool_calls", None)
                 if tool_calls:
-                    print(f"[Chain] Found {len(tool_calls)} tool_calls: {tool_calls}")
+                    print(f"[Chain][{chain_name}] Found {len(tool_calls)} tool_calls: {tool_calls}")
                 # response_metadata 확인
                 response_metadata = getattr(msg, "response_metadata", {})
                 if response_metadata:
-                    print(f"[Chain] Response metadata: {response_metadata}")
+                    print(f"[Chain][{chain_name}] Response metadata: {response_metadata}")
                 # additional_kwargs 확인
                 additional_kwargs = getattr(msg, "additional_kwargs", {})
                 if additional_kwargs:
-                    print(f"[Chain] Additional kwargs: {additional_kwargs}")
+                    print(f"[Chain][{chain_name}] Additional kwargs: {additional_kwargs}")
             
             if finish_reason in ["length", "max_tokens"]:
-                print(f"[Chain] Content ends with: ...{content_str[-200:]}")
+                print(f"[Chain][{chain_name}] Content ends with: ...{content_str[-200:]}")
             
             json_str = _extract_json_from_content(content, msg)
-            print(f"[Chain] Extracted JSON length: {len(json_str)}")
-            print(f"[Chain] Extracted JSON preview (first 500): {json_str[:500]}...")
+            print(f"[Chain][{chain_name}] Extracted JSON length: {len(json_str)}")
+            print(f"[Chain][{chain_name}] Extracted JSON preview (first 500): {json_str[:500]}...")
             if len(json_str) > 500:
-                print(f"[Chain] Extracted JSON preview (last 200): ...{json_str[-200:]}")
+                print(f"[Chain][{chain_name}] Extracted JSON preview (last 200): ...{json_str[-200:]}")
             
             # 응답이 잘렸고 JSON이 불완전할 가능성이 있는 경우 경고
             if finish_reason in ["length", "max_tokens"]:
                 if not json_str.rstrip().endswith("}"):
-                    print(f"[Chain] WARNING: JSON appears incomplete (doesn't end with '}}'). Response was likely truncated.")
+                    print(f"[Chain][{chain_name}] WARNING: JSON appears incomplete (doesn't end with '}}'). Response was likely truncated.")
             
             # 2. JSON 유효성 검증 (Pydantic 전에 먼저 확인)
             try:
                 parsed_json = json.loads(json_str)
-                print(f"[Chain] JSON parse successful, keys: {list(parsed_json.keys()) if isinstance(parsed_json, dict) else 'not a dict'}")
+                print(f"[Chain][{chain_name}] JSON parse successful, keys: {list(parsed_json.keys()) if isinstance(parsed_json, dict) else 'not a dict'}")
                 
-                # 중첩된 구조 확인
+                # Deposit 체인 특화 확인
+                if chain_name == "Deposit" and isinstance(parsed_json, dict):
+                    deposit_amount = parsed_json.get("deposit_amount")
+                    print(f"[Chain][{chain_name}] deposit_amount: {deposit_amount} (type: {type(deposit_amount)})")
+                    if deposit_amount is None:
+                        print(f"[Chain][{chain_name}] WARNING: deposit_amount is None!")
+                
+                # 중첩된 구조 확인 (Price 체인용)
                 if isinstance(parsed_json, dict) and "price" in parsed_json:
                     price_obj = parsed_json.get("price")
                     if isinstance(price_obj, dict):
-                        print(f"[Chain] Price object keys: {list(price_obj.keys())}")
+                        print(f"[Chain][{chain_name}] Price object keys: {list(price_obj.keys())}")
                         if "reference_url" in price_obj:
                             ref_url = price_obj.get("reference_url")
-                            print(f"[Chain] reference_url type: {type(ref_url)}, value: {str(ref_url)[:100] if ref_url else None}")
+                            print(f"[Chain][{chain_name}] reference_url type: {type(ref_url)}, value: {str(ref_url)[:100] if ref_url else None}")
                 
             except json.JSONDecodeError as e:
-                print(f"[Chain] JSON decode error: {e}")
-                print(f"[Chain] Error at line {e.lineno}, column {e.colno}")
-                print(f"[Chain] Problematic JSON around error: {json_str[max(0, e.pos-100):e.pos+100]}")
+                print(f"[Chain][{chain_name}] JSON decode error: {e}")
+                print(f"[Chain][{chain_name}] Error at line {e.lineno}, column {e.colno}")
+                print(f"[Chain][{chain_name}] Problematic JSON around error: {json_str[max(0, e.pos-100):e.pos+100]}")
                 
                 # 응답이 잘린 경우 더 명확한 에러 메시지
                 if finish_reason in ["length", "max_tokens"]:
-                    raise ValueError(f"JSON parsing failed - response was truncated (finish_reason={finish_reason}). "
+                    raise ValueError(f"[{chain_name}] JSON parsing failed - response was truncated (finish_reason={finish_reason}). "
                                    f"Consider increasing max_tokens. Error: {e.msg} at line {e.lineno}, column {e.colno}") from e
                 else:
-                    raise ValueError(f"Invalid JSON format at line {e.lineno}, column {e.colno}: {e.msg}") from e
+                    raise ValueError(f"[{chain_name}] Invalid JSON format at line {e.lineno}, column {e.colno}: {e.msg}") from e
             
             # 3. Pydantic 모델로 변환
             try:
                 result = pydantic_model.model_validate(parsed_json)
-                print(f"[Chain] Pydantic validation successful")
+                print(f"[Chain][{chain_name}] Pydantic validation successful")
+                if chain_name == "Deposit":
+                    print(f"[Chain][{chain_name}] Final deposit_amount: {result.deposit_amount}")
                 return result
             except Exception as e:
-                print(f"[Chain] Pydantic validation error: {type(e).__name__}: {e}")
-                print(f"[Chain] Parsed JSON structure (first 1000 chars):")
+                print(f"[Chain][{chain_name}] Pydantic validation error: {type(e).__name__}: {e}")
+                print(f"[Chain][{chain_name}] Parsed JSON structure (first 1000 chars):")
                 print(json.dumps(parsed_json, ensure_ascii=False, indent=2)[:1000])
                 
                 # 특정 필드 문제 확인
                 if isinstance(parsed_json, dict):
                     for key, value in parsed_json.items():
                         if not isinstance(key, str):
-                            print(f"[Chain] WARNING: Non-string key found: {key} (type: {type(key)})")
+                            print(f"[Chain][{chain_name}] WARNING: Non-string key found: {key} (type: {type(key)})")
                         if isinstance(value, dict):
                             for sub_key, sub_value in value.items():
                                 if not isinstance(sub_key, str):
-                                    print(f"[Chain] WARNING: Non-string sub-key in {key}: {sub_key} (type: {type(sub_key)})")
+                                    print(f"[Chain][{chain_name}] WARNING: Non-string sub-key in {key}: {sub_key} (type: {type(sub_key)})")
                 
                 raise
         
         except ValueError as e:
             # JSON 추출 실패
-            print(f"[Chain] JSON extraction failed: {e}")
+            print(f"[Chain][{chain_name}] JSON extraction failed: {e}")
             content = getattr(msg, "content", None)
             if content:
                 content_str = str(content)
-                print(f"[Chain] Original content length: {len(content_str)}")
-                print(f"[Chain] Original content preview (first 1000): {content_str[:1000]}...")
+                print(f"[Chain][{chain_name}] Original content length: {len(content_str)}")
+                print(f"[Chain][{chain_name}] Original content preview (first 1000): {content_str[:1000]}...")
                 if len(content_str) > 1000:
-                    print(f"[Chain] Original content preview (last 500): ...{content_str[-500:]}")
+                    print(f"[Chain][{chain_name}] Original content preview (last 500): ...{content_str[-500:]}")
             raise
         except Exception as e:
-            print(f"[Chain] Unexpected error in extract_and_parse: {type(e).__name__}: {e}")
+            print(f"[Chain][{chain_name}] Unexpected error in extract_and_parse: {type(e).__name__}: {e}")
             import traceback
-            print(f"[Chain] Traceback: {traceback.format_exc()}")
+            print(f"[Chain][{chain_name}] Traceback: {traceback.format_exc()}")
             raise
     
     return RunnableLambda(extract_and_parse)
@@ -382,20 +470,18 @@ chain_price = (
     RunnableLambda(_prepare_price_input) # 포매터 교체
     | prompt_price
     | chat_decision
-    | create_pydantic_output_parser(PriceDecision)
+    | create_pydantic_output_parser(PriceDecision, "Price")
 )
 
-# 2. Deposit 체인 (수정 - dispute_evidence_str 주입)
-prompt_deposit = ChatPromptTemplate.from_messages([
-    ("system", SYSTEM_PROMPT_DEPOSIT), 
-    ("human", "{user_json}")
-])
+# 2. Deposit 체인 (수정 - used_price_evidence_str 주입)
+# from_template을 사용하여 {user_json}과 {used_price_evidence_str} 변수를 모두 지원
+prompt_deposit = ChatPromptTemplate.from_template(SYSTEM_PROMPT_DEPOSIT)
 
 chain_deposit = (
-    RunnableLambda(_prepare_deposit_rules_input) # 포매터 교체
+    RunnableLambda(_prepare_deposit_input) # [신규] 중고가 정보 포함 포매터
     | prompt_deposit
     | chat_decision
-    | create_pydantic_output_parser(DepositDecision)
+    | create_pydantic_output_parser(DepositDecision, "Deposit")
 )
 
 # 3. Rules 체인 (수정 - dispute_evidence_str 주입)
@@ -405,10 +491,10 @@ prompt_rules = ChatPromptTemplate.from_messages([
 ])
 
 chain_rules = (
-    RunnableLambda(_prepare_deposit_rules_input) # 포매터 교체
+    RunnableLambda(_prepare_rules_input) # [신규] Rules 전용 포매터
     | prompt_rules
     | chat_decision
-    | create_pydantic_output_parser(RulesDecision)
+    | create_pydantic_output_parser(RulesDecision, "Rules")
 )
 
 # --- 3. 최종 병렬 체인 (Graph가 호출할 메인 체인) ---
@@ -423,16 +509,21 @@ chain_parallel_finalize = RunnableParallel(
 
 # [신규 Helper] (Deriver용) 입력 포매터
 def _prepare_deriver_input(state_dict: Dict[str, Any]) -> Dict[str, str]:
-    """GraphState의 inp와 sale_evidence를 {user_json}과 {sale_evidence_str}로 변환"""
+    """GraphState의 inp, sale_evidence, used_evidence를 {user_json}, {sale_evidence_str}, {used_price_evidence_str}로 변환"""
     inp = state_dict.get("inp", {})
     sale_evidence = state_dict.get("sale_evidence", [])
+    used_evidence = state_dict.get("used_evidence", [])  # [신규] Fallback 경로에서도 used_evidence 활용
     
     # [검증] 입력 데이터 확인
     print(f"[Chain] Deriver Input: inp keys={list(inp.keys())}")
     print(f"[Chain] Deriver Input: sale_evidence count={len(sale_evidence)}")
+    print(f"[Chain] Deriver Input: used_evidence count={len(used_evidence)}")
     if sale_evidence:
         print(f"[Chain] Deriver Input: First sale_evidence keys={list(sale_evidence[0].keys())}")
         print(f"[Chain] Deriver Input: First sale_evidence sample - {str(sale_evidence[0])[:150]}...")
+    if used_evidence:
+        print(f"[Chain] Deriver Input: First used_evidence keys={list(used_evidence[0].keys())}")
+        print(f"[Chain] Deriver Input: First used_evidence sample - {str(used_evidence[0])[:150]}...")
     
     # 1. user_json 생성
     user_json_str = json.dumps(inp, ensure_ascii=False)
@@ -442,16 +533,23 @@ def _prepare_deriver_input(state_dict: Dict[str, Any]) -> Dict[str, str]:
     print(f"[Chain] Deriver Input: sale_evidence_str length={len(sale_evidence_str)}")
     print(f"[Chain] Deriver Input: sale_evidence_str preview - {sale_evidence_str[:200]}...")
     
+    # 3. [신규] used_evidence_str 생성 (Fallback 경로에서도 중고가 정보 활용)
+    if not used_evidence:
+        used_evidence_str = "검색된 중고가 정보가 없습니다."
+    else:
+        formatted_used = _format_evidence_list_to_string(used_evidence)
+        used_evidence_str = formatted_used.get("source", "")
+        print(f"[Chain] Deriver Input: used_evidence_str length={len(used_evidence_str)}")
+        print(f"[Chain] Deriver Input: used_evidence_str preview - {used_evidence_str[:200]}...")
+    
     return {
         "user_json": user_json_str,
-        "sale_evidence_str": sale_evidence_str
+        "sale_evidence_str": sale_evidence_str,
+        "used_price_evidence_str": used_evidence_str  # [신규] Fallback 경로에서도 중고가 정보 전달
     }
 
 #  대여가 추론기 체인
-prompt_deriver = ChatPromptTemplate.from_messages([
-    ("system", SYSTEM_PROMPT_DERIVER), # {sale_evidence_str} 변수 사용
-    ("human", "{user_json}")
-])
+prompt_deriver = ChatPromptTemplate.from_template(SYSTEM_PROMPT_DERIVER)  # {user_json}, {sale_evidence_str}, {used_price_evidence_str} 변수 사용
 chain_derive_rental_price = (
     RunnableLambda(_prepare_deriver_input)
     | prompt_deriver

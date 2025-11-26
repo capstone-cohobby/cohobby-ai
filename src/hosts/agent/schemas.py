@@ -17,6 +17,7 @@ class AgentInput(BaseModel):
     batch_summary: Optional[Dict[str, Any]] = Field(None, description="S3 배치 요약 결과")
     rag_analysis_report: Optional[Dict[str, Any]] = Field(None, description="RAG 분석 리포트")
     evidence: Optional[List[Dict[str, Any]]] = Field(None, description=" 요약 전 시장 데이터 원본 RAG 증거 목록")
+    used_evidence: Optional[List[Dict[str, Any]]] = Field(None, description="중고가 검색 결과 (보증금 산정용)")
     dispute_evidence: Optional[List[Dict[str, Any]]] = Field(None, description="분쟁 사례 리스트 (RAG 증거)")
 
 class PriceEstimate(BaseModel):
@@ -61,19 +62,13 @@ class PriceDecision(BaseModel):
         return self
 
 class DepositDecision(BaseModel):
-    """Finalize(Deposit) 체인의 출력"""
-    deposit_required: bool = False
-    deposit_amount: Optional[float] = None
+    """Finalize(Deposit) 체인의 출력
+    
+    보증금은 파손/연체 대비용 책임 한도 금액으로 산정됩니다.
+    분실/도난에 대한 전액 배상은 별도 약관으로 처리하므로 보증금에 포함하지 않습니다.
+    """
+    deposit_amount: int = Field(ge=0, description="파손/연체 대비 책임 한도 금액 (원 단위, 0원 가능)")
     reasoning: Optional[str] = None
-    @model_validator(mode="after")
-    def _deposit_consistency(self):
-        if self.deposit_required:
-            if self.deposit_amount is None or self.deposit_amount <= 0:
-                raise ValueError("deposit_amount must be > 0 when deposit_required is true")
-        else:
-            if self.deposit_amount not in (None, 0):
-                raise ValueError("deposit_amount should be None or 0 when deposit is not required")
-        return self
 
 class RulesDecision(BaseModel):
     """Finalize(Rules) 체인의 출력"""
@@ -134,6 +129,7 @@ class GraphState(TypedDict, total=False):
     internal_docs: List[Dict[str, Any]]
     web_docs: List[Dict[str, Any]]
     evidence: List[Dict[str, Any]] # RAG 병합 결과
+    used_evidence: Optional[List[Dict[str, Any]]] # 중고가 RAG 결과 (보증금 산정용)
     dispute_evidence: Optional[List[Dict[str, Any]]] # 분쟁 사례 RAG 결과
     
     # LLM 요약 결과 (Finalize 입력)
