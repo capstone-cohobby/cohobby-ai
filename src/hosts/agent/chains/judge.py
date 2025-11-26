@@ -16,10 +16,50 @@ from ..prompts.prompt import (       # 3. Prompts
 
 # --- 1. LLM 응답 파서 (공통 유틸) ---
 
-def _extract_json_from_content(content: Any) -> str:
-    """AIMessage.content에서 <thinking> 태그와 코드 블록을 제거하고 순수 JSON 추출"""
-    if not content:
-        raise ValueError("No content received from LLM")
+def _extract_json_from_content(content: Any, msg: Any = None) -> str:
+    """AIMessage.content에서 <thinking> 태그와 코드 블록을 제거하고 순수 JSON 추출
+    
+    Args:
+        content: AIMessage.content (문자열 또는 None)
+        msg: 전체 AIMessage 객체 (content가 비어있을 때 다른 필드 확인용)
+    """
+    # content가 비어있을 때 다른 곳에서 데이터 찾기 시도
+    if not content or (isinstance(content, str) and len(content.strip()) == 0):
+        if msg is not None:
+            # tool_calls 확인 (Function Calling 사용 시)
+            tool_calls = getattr(msg, "tool_calls", None) or getattr(msg, "tool_calls", [])
+            if tool_calls:
+                print(f"[JSON Extract] Content is empty, but found {len(tool_calls)} tool_calls")
+                # tool_calls에서 JSON 추출 시도
+                for tool_call in tool_calls:
+                    if hasattr(tool_call, "args"):
+                        args = tool_call.args
+                        if isinstance(args, dict):
+                            # args를 JSON 문자열로 변환
+                            return json.dumps(args, ensure_ascii=False)
+                    elif isinstance(tool_call, dict) and "args" in tool_call:
+                        args = tool_call["args"]
+                        if isinstance(args, dict):
+                            return json.dumps(args, ensure_ascii=False)
+            
+            # response_metadata 확인
+            response_metadata = getattr(msg, "response_metadata", {})
+            if response_metadata:
+                print(f"[JSON Extract] Content is empty, checking response_metadata: {response_metadata}")
+                # metadata에 JSON이 있을 수 있음
+                if "output" in response_metadata:
+                    output = response_metadata["output"]
+                    if isinstance(output, dict):
+                        return json.dumps(output, ensure_ascii=False)
+                    elif isinstance(output, str):
+                        s = str(output)
+                        if s.strip():
+                            return s
+        
+        # 모든 시도 실패
+        raise ValueError("No content received from LLM (content is empty or None). "
+                        "This may happen if the model used function calling or structured output. "
+                        "Check if the LLM response has tool_calls or response_metadata.")
         
     s = str(content) # AIMessage.content가 문자열이라고 가정
     original_s = s  # 디버깅용 원본 저장
@@ -218,10 +258,27 @@ def create_pydantic_output_parser(pydantic_model: Any):
             content = getattr(msg, "content", None)
             content_str = str(content) if content else ""
             print(f"[Chain] Original content length: {len(content_str)}")
+            
+            # content가 비어있을 때 추가 정보 확인
+            if not content_str or len(content_str.strip()) == 0:
+                print(f"[Chain] WARNING: Content is empty!")
+                # tool_calls 확인
+                tool_calls = getattr(msg, "tool_calls", None)
+                if tool_calls:
+                    print(f"[Chain] Found {len(tool_calls)} tool_calls: {tool_calls}")
+                # response_metadata 확인
+                response_metadata = getattr(msg, "response_metadata", {})
+                if response_metadata:
+                    print(f"[Chain] Response metadata: {response_metadata}")
+                # additional_kwargs 확인
+                additional_kwargs = getattr(msg, "additional_kwargs", {})
+                if additional_kwargs:
+                    print(f"[Chain] Additional kwargs: {additional_kwargs}")
+            
             if finish_reason in ["length", "max_tokens"]:
                 print(f"[Chain] Content ends with: ...{content_str[-200:]}")
             
-            json_str = _extract_json_from_content(content)
+            json_str = _extract_json_from_content(content, msg)
             print(f"[Chain] Extracted JSON length: {len(json_str)}")
             print(f"[Chain] Extracted JSON preview (first 500): {json_str[:500]}...")
             if len(json_str) > 500:
@@ -315,7 +372,7 @@ chain_rag_summarizer = (
     RunnableLambda(_format_evidence_list_to_string)
     | prompt_rag_summarizer
     | chat_summarizer
-    | RunnableLambda(lambda msg: _extract_json_from_content(getattr(msg, "content", None)))
+    | RunnableLambda(lambda msg: _extract_json_from_content(getattr(msg, "content", None), msg))
     | RunnableLambda(lambda json_str: json.loads(json_str))
 )
 
