@@ -94,6 +94,7 @@ async def retrieve_sale_price_web(query: str):
     ]
     
 def merge_evidence(internal: List[Dict], web: List[Dict], top_k: int = 8) -> List[Dict[str, Any]]:
+    """내부와 웹 증거를 병합하되, 내부 데이터(가격 정보 포함)에 우선순위 부여"""
     merged = (internal or []) + (web or [])
     seen, uniq = set(), []
     for d in merged:
@@ -103,7 +104,23 @@ def merge_evidence(internal: List[Dict], web: List[Dict], top_k: int = 8) -> Lis
         if key:
             seen.add(key)
         uniq.append(d)
-    uniq.sort(key=lambda x: x.get("score") or 0.0, reverse=True)
+    
+    # [중요] 스코어 정렬 시 내부 데이터에 가격이 있으면 보정
+    def adjusted_score(doc):
+        base_score = doc.get("score") or 0.0
+        source = doc.get("source", "")
+        price = doc.get("price")
+        
+        # 내부 데이터이고 가격 정보가 있으면 스코어 보정 (우선순위 상향)
+        if source == "internal" and price:
+            base_score += 0.3  # 내부 가격 정보가 있으면 +0.3 보정
+        # 내부 데이터는 기본적으로 +0.2 보정 (웹보다 우선)
+        elif source == "internal":
+            base_score += 0.1
+        
+        return base_score
+    
+    uniq.sort(key=adjusted_score, reverse=True)
     return uniq[:top_k]
 
 async def retrieve_dispute_cases(query: str, top_k=5) -> List[Dict[str, Any]]:
