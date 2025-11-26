@@ -70,14 +70,23 @@ SYSTEM_PROMPT_PRICE = """
 2. **유사 항목 찾기:** evidence 목록에서 사용자의 입력(name)과 가장 유사한 항목을 찾아 그 가격을 **기본 기준(Baseline)**으로 삼아라.
 3. **분석가 의견 참고:** 리포트의 `analysis_reasoning`을 참고하여 아웃라이어(특수 매물)를 걸러내라.
 4. **결정:** 증거가 충분하다면 구체적인 가격(`point`, `low`, `high`)을 산정하고, 부족하다면 `uncertain`으로 판정하라.
-5. **통화 단위**:** 모든 가격 수치는 **대한민국 원(KRW) 단위여야 한다. (예: 50000, 7500)
+5. **통화 단위 (매우 중요):** 
+   - 모든 가격 수치는 **대한민국 원(KRW) 단위**여야 한다.
+   - **절대로 달러($)나 USD를 사용하지 마라.**
+   - 숫자만 입력하라 (예: 50000, 7500, 15000)
+   - 예시: 5만원 = 50000, 7천5백원 = 7500, 1만5천원 = 15000
 
 <JSON_OUTPUT_SCHEMA>
 {{
   "decision": "reasonable" | "unreasonable" | "uncertain",
   "confidence": <0..1 float>,
   "reasoning": "<원본 증거 중 어떤 항목(제목/가격)을 참조했는지 명시하여 서술>",
-  "price": {{ "point": <int|null>, "low": <int|null>, "high": <int|null>, "basis": "<선택>" }}
+  "price": {{ 
+    "point": <int|null>,  // 예: 50000 (5만원), 7500 (7천5백원) - 원(KRW) 단위
+    "low": <int|null>,    // 예: 3000 (3천원) - 원(KRW) 단위
+    "high": <int|null>,   // 예: 10000 (1만원) - 원(KRW) 단위
+    "basis": "<선택>" 
+  }}
 }}
 </JSON_OUTPUT_SCHEMA>
 
@@ -123,7 +132,11 @@ SYSTEM_PROMPT_DERIVER = """
 
 [출력 요구사항]
 - `reasoning`: 구체적인 계산 로직을 서술할 것.
-- 통화 단위는 대한민국 원(KRW).
+- **통화 단위 (매우 중요):**
+  - 모든 가격 수치는 **대한민국 원(KRW) 단위**여야 한다.
+  - **절대로 달러($)나 USD를 사용하지 마라.**
+  - 숫자만 입력하라 (예: 50000, 7500, 15000)
+  - 예시: 5만원 = 50000, 7천5백원 = 7500, 1만5천원 = 15000
 - **[중요] Reference URL 처리:**
   1. 제공된 `sale_evidence_str`에 있는 URL을 우선적으로 사용해라.
   2. 만약 제공된 정보가 부족하여 **너의 내부 지식(Internal Knowledge)을 사용하여 가격을 추론했다면**, 네가 참고한 해당 쇼핑몰의 URL(예: SSG, Coupang 등)을 **반드시 `reference_url` 필드에 기입해라.**
@@ -135,11 +148,11 @@ SYSTEM_PROMPT_DERIVER = """
   "confidence": <0.3~0.6>,
   "reasoning": "<위 논리에 따른 구체적 서술>",
   "price": {{
-      "point": <일일 대여료>,
-      "low": <최소 예상치>,
-      "high": <최대 예상치>,
+      "point": <일일 대여료>,        // 예: 5000 (5천원) - 원(KRW) 단위, 달러($) 아님
+      "low": <최소 예상치>,          // 예: 3000 (3천원) - 원(KRW) 단위
+      "high": <최대 예상치>,         // 예: 10000 (1만원) - 원(KRW) 단위
       "basis": "판매가 기반 추론 (ROI 역산)",
-      "reference_price": <기준 가격(숫자)>,
+      "reference_price": <기준 가격(숫자)>,  // 예: 150000 (15만원) - 원(KRW) 단위
       "reference_type": "new" | "used",
       "reference_url": "<출처 URL>"
   }}
@@ -159,12 +172,15 @@ SYSTEM_PROMPT_DEPOSIT = """
 2. 사례가 없거나 경미하다면 false로 설정하라.
 3. **[중요]** `deposit_required`가 true라면, 반드시 `deposit_amount`에 **0보다 큰 합리적인 금액(예: 30000, 50000)**을 입력해야 한다.
    - **절대 0이나 null을 출력하지 말라.** (0원을 적을 거면 required를 false로 해라)
-4. 보증금 금액은 **대한민국 원(KRW)** 단위로 설정하라.
+4. **통화 단위 (매우 중요):**
+   - 보증금 금액은 **대한민국 원(KRW) 단위**로 설정하라.
+   - **절대로 달러($)나 USD를 사용하지 마라.**
+   - 숫자만 입력하라 (예: 30000 = 3만원, 50000 = 5만원)
 
 <JSON_OUTPUT_SCHEMA>
 {{
   "deposit_required": <bool>,
-  "deposit_amount": <int|null>,
+  "deposit_amount": <int|null>,  // 예: 30000 (3만원), 50000 (5만원) - 원(KRW) 단위, 달러($) 아님
   "reasoning": "<분쟁 사례를 인용하여 사유 서술>"
 }}
 </JSON_OUTPUT_SCHEMA>
