@@ -164,6 +164,11 @@ async def summarize_rag_evidence(state: GraphState) -> GraphState:
         state["rag_analysis_report"] = None 
         return state
     
+    # [검증] Evidence 전달 확인
+    print(f"[Graph] RAG Analyst: Received {len(evidence)} evidence items")
+    if evidence:
+        print(f"[Graph] RAG Analyst: First evidence sample - {str(evidence[0])[:100]}...")
+    
     try:
         # chain_rag_summarizer가 이제 JSON(Dict)을 반환한다고 가정
         analysis_report = await chain_rag_summarizer.ainvoke(evidence)
@@ -190,15 +195,26 @@ async def finalize_parallel(state: GraphState) -> GraphState:
         final_inp_dict = dict(state["inp"])
         final_inp_dict["category"] = state["inp"].get("category") 
         final_inp_dict["rag_analysis_report"] = state.get("rag_analysis_report")
-        final_inp_dict["evidence"] = state.get("evidence",[])
-        final_inp_dict["dispute_evidence"] = state.get("dispute_evidence", [])
+        final_inp_dict["evidence"] = state.get("evidence", [])
+        
+        # [수정] dispute_evidence를 리스트로 직접 전달 (dispute_evidence_str 제거)
+        dispute_list = state.get("dispute_evidence", [])
+        final_inp_dict["dispute_evidence"] = dispute_list
+        
+        # [검증] 전달되는 데이터 확인
+        print(f"[Graph] Finalize Parallel: Preparing AgentInput...")
+        print(f"[Graph] Finalize Parallel: - evidence count: {len(final_inp_dict.get('evidence', []))}")
+        print(f"[Graph] Finalize Parallel: - dispute_evidence count: {len(dispute_list)}")
+        print(f"[Graph] Finalize Parallel: - rag_analysis_report: {bool(final_inp_dict.get('rag_analysis_report'))}")
         
         # (선택) 하위 호환성을 위해 rag_summary에도 텍스트 요약본 주입
         if isinstance(state.get("rag_analysis_report"), dict):
             final_inp_dict["rag_summary"] = state["rag_analysis_report"].get("summary_text")
         else:
             final_inp_dict["rag_summary"] = None
+        
         ai = AgentInput(**final_inp_dict)
+        print(f"[Graph] Finalize Parallel: AgentInput created successfully")
 
         # 2. 병렬 체인 호출 (Pydantic In -> Dict[str, Pydantic] Out)
         print("[Graph] Finalize Parallel: Invoking Price, Deposit, Rules...")
@@ -220,6 +236,8 @@ async def finalize_parallel(state: GraphState) -> GraphState:
         
     except Exception as e:
         print(f"[Graph] Finalize Parallel ERROR: {e}")
+        import traceback
+        print(f"[Graph] Finalize Parallel ERROR Traceback: {traceback.format_exc()}")
         state["error"] = f"finalize_error: {e}"
     return state
 
@@ -251,29 +269,57 @@ async def derive_rental_price_node(state: GraphState) -> GraphState:
     """ 판매가 기반 대여가 추론 LLM 호출"""
     print("[Graph] Fallback: Invoking Deriver LLM...")
 
+    # [검증] sale_evidence 확인
+    sale_docs = state.get("sale_evidence", [])
+    print(f"[Graph] Fallback Deriver: sale_evidence count={len(sale_docs)}")
+    if sale_docs:
+        print(f"[Graph] Fallback Deriver: First sale_evidence sample - {str(sale_docs[0])[:150]}...")
+    else:
+        print("[Graph] Fallback Deriver: WARNING - No sale_evidence found!")
+
     try:
-        # [수정] chain_derive_rental_price는 state 딕셔너리의 일부를 입력받음
-        deriver_input = {
-            "inp": state.get("inp"),
-            "sale_evidence": state.get("sale_evidence"),
-            "used_evidence": state.get("used_evidence", []),
+        # [수정] chain_derive_rental_price는 _prepare_deriver_input을 사용하므로
+        # state dict를 직접 전달해야 함 (inp와 sale_evidence가 포함된 dict)
+        # _prepare_deriver_input이 state_dict에서 inp와 sale_evidence를 추출하여
+        # user_json과 sale_evidence_str로 변환함
+        state_dict = {
+            "inp": state.get("inp", {}),
+            "sale_evidence": sale_docs
         }
-        derived_price_decision = await chain_derive_rental_price.ainvoke(deriver_input)
         
-        # 기존 PriceDecision을 덮어쓰기
+        print(f"[Graph] Fallback Deriver: Preparing input with inp keys={list(state_dict.get('inp', {}).keys())}")
+        print(f"[Graph] Fallback Deriver: sale_evidence items={len(state_dict.get('sale_evidence', []))}")
+        
+        # 체인 호출 (state_dict를 전달하면 _prepare_deriver_input이 처리)
+        derived_price_decision = await chain_derive_rental_price.ainvoke(state_dict)
+        
+        # [검증] reference_url이 제대로 포함되었는지 확인
+        if derived_price_decision and derived_price_decision.price:
+            price_obj = derived_price_decision.price
+            print(f"[Graph] Fallback Deriver: Price OK (Overwritten)")
+            print(f"[Graph] Fallback Deriver: decision={derived_price_decision.decision}")
+            print(f"[Graph] Fallback Deriver: confidence={derived_price_decision.confidence}")
+            print(f"[Graph] Fallback Deriver: price.point={price_obj.point}")
+            print(f"[Graph] Fallback Deriver: price.reference_price={price_obj.reference_price}")
+            print(f"[Graph] Fallback Deriver: price.reference_type={price_obj.reference_type}")
+            print(f"[Graph] Fallback Deriver: price.reference_url={price_obj.reference_url}")
+            
+            if not price_obj.reference_url:
+                print("[Graph] Fallback Deriver: WARNING - reference_url is None or empty!")
+        else:
+            print("[Graph] Fallback Deriver: WARNING - price_decision or price object is None")
+        
         state["price_decision"] = derived_price_decision
-        print("[Graph] Fallback Deriver: Price OK (Overwritten)")
-        
-        # 최종 결정된 가격을 캐시에 저장
         set_verdict(state["signature"], derived_price_decision)
-        print("[Cache] SET OK (Derived):", state["signature"])
         
     except Exception as e:
         print(f"[Graph] Fallback Deriver ERROR: {e}")
+        import traceback
+        print(f"[Graph] Fallback Deriver ERROR Traceback: {traceback.format_exc()}")
         state["error"] = f"deriver_error: {e}"
-        # 추론 실패 시 기존 'uncertain' 결정이 캐시되지 않고 유지됨
         
     return state
+
 
 async def retrieve_dispute_cases_node(state: GraphState) -> GraphState:
     """ 분쟁 조정 사례 RAG 실행"""
@@ -355,28 +401,52 @@ async def run_once(payload: Dict[str, Any]) -> Dict[str, Any]:
     final_state = await app_graph.ainvoke(state)
     
     print("\n--- Final State ---")
-    # Pydantic 모델을 dict로 변환하여 출력
+
+    # [수정] Pydantic 모델 안전하게 덤프하기 (None 체크)
+    
+    # 1. Price (Deriver가 복구했으므로 있을 가능성 높음)
+    price_res = None
+    if final_state.get("price_decision"):
+        price_res = final_state.get("price_decision").model_dump()
+        # [검증] 최종 출력 구조 확인
+        if price_res and price_res.get("price"):
+            price_obj = price_res.get("price")
+            print(f"[Graph] Final Output: price.reference_url={price_obj.get('reference_url')}")
+            print(f"[Graph] Final Output: price.reference_price={price_obj.get('reference_price')}")
+            print(f"[Graph] Final Output: price.reference_type={price_obj.get('reference_type')}")
+            # 중복 필드 확인
+            if "reference_url" in price_res:
+                print(f"[Graph] Final Output: WARNING - reference_url found at top level (should be in price object only)")
+        
+    # 2. Deposit (Finalize 실패 시 없을 수 있음 -> 기본값 제공)
+    deposit_res = None
+    if final_state.get("deposit_decision"):
+        deposit_res = final_state.get("deposit_decision").model_dump()
+    else:
+        # ★ 비상용 기본값 (Fallback)
+        deposit_res = {
+            "deposit_required": False,
+            "deposit_amount": 0,
+            "reasoning": "시스템 에러로 인해 보증금 정책을 산정하지 못했습니다."
+        }
+
+    # 3. Rules (Finalize 실패 시 없을 수 있음 -> 기본값 제공)
+    rules_res = None
+    if final_state.get("rules_decision"):
+        rules_res = final_state.get("rules_decision").model_dump()
+    else:
+        # ★ 비상용 기본값 (Fallback)
+        rules_res = {
+            "rules": ["물품 파손 시 실비 청구", "기본 대여 약관 준수"],
+            "reasoning": "시스템 에러로 인해 상세 규칙을 생성하지 못했습니다."
+        }
+
     output = {
-        "price": final_state.get("price_decision").model_dump() if final_state.get("price_decision") else None,
-        "deposit": final_state.get("deposit_decision").model_dump() if final_state.get("deposit_decision") else None,
-        "rules": final_state.get("rules_decision").model_dump() if final_state.get("rules_decision") else None,
+        "price": price_res,
+        "deposit": deposit_res,
+        "rules": rules_res,
         "cache_hit": final_state.get("cache_hit", False),
         "error": final_state.get("error"),
-        
-        # RAG Analyst가 본 원본 증거(evidence)를 출력합니다.
         "evidence": final_state.get("evidence", [])
     }
     return output
-
-## 예시 실행
-if __name__ == "__main__":
-    sample = {
-        "name": "exo 응원봉",
-        "condition": "상태 이상 없음",
-        "bought_at": "2023-05",
-    }
-    print("[Graph] Running sample...")
-    
-    decision = asyncio.run(run_once(sample))
-    
-    print(json.dumps(decision, ensure_ascii=False, indent=2))

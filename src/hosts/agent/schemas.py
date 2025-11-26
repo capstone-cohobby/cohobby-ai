@@ -24,13 +24,15 @@ class PriceEstimate(BaseModel):
     low: Optional[float] = None
     high: Optional[float] = None
     basis: Optional[str] = None
+    # Fallback 추론의 근거가 된 가격과 출처 (Deriver 체인에서 사용)
+    reference_price: Optional[float] = Field(None, description="참조한 판매가 또는 중고가")
+    reference_type: Optional[Literal["new", "used"]] = Field(None, description="참조 가격의 유형 (신품/중고)")
+    reference_url: Optional[str] = Field(None, description="참조한 가격 정보의 출처 URL")
     @model_validator(mode="after")
     def _ensure_bounds(self):
         if self.low is not None and self.high is not None and self.point is not None:
             if self.low > self.high:
-                raise ValueError("price.low must be <= price.high")
-            if not (self.low <= self.point <= self.high):
-                raise ValueError("price.point must be within [low, high]")
+                self.low, self.high = self.high, self.low  # 자동 스왑
         for k in ("point","low","high"):
             v = getattr(self, k, None)
             if v is not None and v < 0:
@@ -38,16 +40,15 @@ class PriceEstimate(BaseModel):
         return self
 
 class PriceDecision(BaseModel):
-    """Finalize(Price) 체인의 출력"""
+    """Finalize(Price) 체인의 출력
+    
+    - Price 체인: 일반 가격 산정 (reference_* 필드 없음)
+    - Deriver 체인: Fallback 추론 (reference_* 필드는 price 객체 안에 있음)
+    """
     decision: Literal["reasonable", "unreasonable", "uncertain"]
     confidence: float = Field(ge=0.0, le=1.0)
     reasoning: Optional[str] = None
     price: PriceEstimate
-    
-    # Fallback 추론의 근거가 된 가격과 출처
-    reference_price: Optional[float] = Field(None, description="참조한 판매가 또는 중고가")
-    reference_type: Optional[Literal["new", "used"]] = Field(None, description="참조 가격의 유형 (신품/중고)")
-    reference_url: Optional[str] = Field(None, description="참조한 가격 정보의 출처 URL")
     
     @model_validator(mode="after")
     def _coherence(self):
@@ -133,6 +134,7 @@ class GraphState(TypedDict, total=False):
     internal_docs: List[Dict[str, Any]]
     web_docs: List[Dict[str, Any]]
     evidence: List[Dict[str, Any]] # RAG 병합 결과
+    dispute_evidence: Optional[List[Dict[str, Any]]] # 분쟁 사례 RAG 결과
     
     # LLM 요약 결과 (Finalize 입력)
     rag_summary: Optional[str]

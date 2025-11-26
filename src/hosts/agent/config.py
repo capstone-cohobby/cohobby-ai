@@ -39,7 +39,7 @@ class Settings:
     temperature_decision: float = float(os.getenv("DECISION_TEMPERATURE", "0.1"))
     temperature_summarizer: float = float(os.getenv("SUMMARIZER_TEMPERATURE", "0.3"))
 
-    max_output_tokens_decision: int = int(os.getenv("MAX_OUTPUT_TOKENS_DECISION", "1024"))
+    max_output_tokens_decision: int = int(os.getenv("MAX_OUTPUT_TOKENS_DECISION", "2048"))  # Deriver 체인에서 긴 JSON 응답을 위해 증가
     max_output_tokens_summarizer: int = int(os.getenv("MAX_OUTPUT_TOKENS_SUMMARIZER", "1536"))
 
     llm_request_timeout_secs: float = _as_float(

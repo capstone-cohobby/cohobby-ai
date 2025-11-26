@@ -1,14 +1,14 @@
 # tools/rag_tools.py
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
-from hosts.agent.stores.emb_store import ChromaHybridIndex
+from hosts.agent.stores.emb_store import ChromaHybridIndex, DisputeIndex
 from tavily import TavilyClient
 import os
 import asyncio
 
 # 컬렉션 이름 
 _INTERNAL_IDX = ChromaHybridIndex("cohobby_internal")  # 내부 데이터
-_DISPUTE_IDX = ChromaHybridIndex("cohobby_dispute")    # 분쟁 사례 데이터
+_DISPUTE_IDX = DisputeIndex("cohobby_dispute")    # 분쟁 사례 데이터
 
 async def retrieve_internal(query: str, top_k=10) -> List[Dict[str, Any]]:
 
@@ -107,5 +107,5 @@ def merge_evidence(internal: List[Dict], web: List[Dict], top_k: int = 8) -> Lis
     return uniq[:top_k]
 
 async def retrieve_dispute_cases(query: str, top_k=5) -> List[Dict[str, Any]]:
-    cands = await asyncio.to_thread(_DISPUTE_IDX.search, query=query, top_k=top_k)
+    cands = await asyncio.to_thread(_DISPUTE_IDX.search_rules, query=query, top_k=top_k)
     return cands
