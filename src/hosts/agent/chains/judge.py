@@ -125,6 +125,31 @@ def _extract_json_from_content(content: Any, msg: Any = None) -> str:
             except (json.JSONDecodeError, ValueError):
                 pass
         
+        # 불완전한 필드 복구 시도: rules 배열이 비어있거나 잘린 경우 복구
+        # 예: {"rules": [], "reasoning": "..."  같은 경우
+        if "rules" in candidate and '"rules"' in candidate:
+            # rules 필드가 있는 경우, 불완전한 JSON 복구 시도
+            # 마지막 불완전한 필드 제거 시도
+            lines = candidate.split("\n")
+            for i in range(len(lines), 0, -1):
+                candidate_truncated = "\n".join(lines[:i]).rstrip().rstrip(",")
+                # 마지막에 불완전한 필드가 있으면 제거하고 닫는 중괄호 추가
+                if not candidate_truncated.endswith("}"):
+                    candidate_truncated = candidate_truncated.rstrip().rstrip(",")
+                    # rules 배열이 있으면 닫기
+                    if '"rules"' in candidate_truncated and '"rules"' not in candidate_truncated.split('"rules"')[1].split('}')[0]:
+                        # rules 배열 닫기 시도
+                        if candidate_truncated.count('[') > candidate_truncated.count(']'):
+                            candidate_truncated += "]"
+                    candidate_truncated += "}"
+                if candidate_truncated.endswith("}"):
+                    try:
+                        parsed = json.loads(candidate_truncated)
+                        print(f"[JSON Extract] Fixed incomplete JSON by truncating and closing")
+                        return candidate_truncated
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+        
         # 또는 마지막 불완전한 필드 제거 시도
         # 마지막 쉼표나 불완전한 필드를 제거
         lines = candidate.split("\n")
@@ -138,8 +163,40 @@ def _extract_json_from_content(content: Any, msg: Any = None) -> str:
                 except (json.JSONDecodeError, ValueError):
                     continue
     
-    # 4. 실패 시 상세한 디버깅 정보와 함께 에러
+    # 4. 마지막 시도: 원본 문자열에서 직접 JSON 패턴 찾기 (잘린 경우 대비)
+    # 원본 문자열에서 {"rules" 패턴을 찾아서 부분 JSON 복구 시도
+    if len(s) < 100 and "rules" in original_s.lower():
+        # 원본에서 {"rules" 부터 시작하는 부분 찾기
+        rules_match = re.search(r'\{\s*"rules"\s*:', original_s, re.IGNORECASE)
+        if rules_match:
+            start_pos = rules_match.start()
+            # 시작부터 끝까지 가져오기
+            partial_json = original_s[start_pos:].strip()
+            # 닫는 중괄호 추가 시도
+            open_count = partial_json.count("{")
+            close_count = partial_json.count("}")
+            if open_count > close_count:
+                partial_json += "}" * (open_count - close_count)
+            # 최소한의 JSON 구조 복구 시도
+            if '"rules"' in partial_json and ']' not in partial_json.split('"rules"')[1].split('}')[0]:
+                # rules 배열이 닫히지 않은 경우
+                rules_part = partial_json.split('"rules"')[1]
+                if '[' in rules_part and ']' not in rules_part.split('}')[0]:
+                    # rules 배열 닫기
+                    before_close = partial_json.rfind('}')
+                    if before_close > 0:
+                        partial_json = partial_json[:before_close] + ']' + partial_json[before_close:]
+            
+            try:
+                parsed = json.loads(partial_json)
+                print(f"[JSON Extract] Recovered partial JSON from original content")
+                return partial_json
+            except (json.JSONDecodeError, ValueError):
+                pass
+    
+    # 5. 실패 시 상세한 디버깅 정보와 함께 에러
     print(f"[JSON Extract] Failed to extract JSON. Content length: {len(s)}")
+    print(f"[JSON Extract] Original content length: {len(original_s)}")
     print(f"[JSON Extract] First 1000 chars: {s[:1000]}")
     print(f"[JSON Extract] Last 500 chars: {s[-500:]}")
     print(f"[JSON Extract] Brace count - Open: {s.count('{')}, Close: {s.count('}')}")
@@ -265,7 +322,11 @@ def _prepare_deposit_input(ai_input: AgentInput) -> Dict[str, str]:
 
 # [신규 Helper] Rules 체인용 입력 포매터 (기존 유지)
 def _prepare_rules_input(ai_input: AgentInput) -> Dict[str, str]:
-    """AgentInput에서 분쟁 사례 리스트를 꺼내 문자열로 변환"""
+    """AgentInput에서 분쟁 사례 리스트를 꺼내 문자열로 변환
+    
+    빈 값 처리:
+    - 빈 리스트 [], None, 빈 문자열 "", "없음", "[]" 등의 경우를 모두 빈 값으로 간주
+    """
     user_json = ai_input.model_dump_json(exclude={"evidence", "used_evidence", "dispute_evidence","rag_analysis_report","rag_summary"})
     
     # dispute_evidence 필드에서 분쟁 사례 리스트를 가져옴
@@ -276,31 +337,70 @@ def _prepare_rules_input(ai_input: AgentInput) -> Dict[str, str]:
     if dispute_list:
         print(f"[Chain] Rules Input: First dispute sample - {str(dispute_list[0])[:100]}...")
     
+    # 빈 값 체크 강화: 빈 리스트, None, 빈 문자열, "없음", "[]" 등 모두 체크
+    def _is_empty_dispute(dispute_list) -> bool:
+        """분쟁 사례가 실제로 비어있는지 체크"""
+        if not dispute_list:
+            return True
+        if isinstance(dispute_list, str):
+            # 문자열인 경우 빈 값 체크
+            stripped = dispute_list.strip().lower()
+            return not stripped or stripped in ["없음", "[]", "null", "none", ""]
+        if isinstance(dispute_list, list):
+            # 리스트인 경우 실제 유의미한 데이터가 있는지 체크
+            if len(dispute_list) == 0:
+                return True
+            # 리스트의 각 항목이 실제로 유의미한지 체크 (모든 키가 비어있는 경우 등)
+            for item in dispute_list:
+                if isinstance(item, dict):
+                    # 최소한 하나의 키에 실제 값이 있는지 확인
+                    has_content = any(
+                        v and str(v).strip() and str(v).strip().lower() not in ["없음", "[]", "null", "none", ""]
+                        for v in item.values()
+                    )
+                    if has_content:
+                        return False
+            return True  # 모든 항목이 비어있으면 빈 값으로 간주
+        return True
+    
     # 포매팅 재활용 (토큰 절약: 상위 3개만 사용, 본문 300자로 제한)
-    if not dispute_list:
-        dispute_str = "검색된 유사 분쟁 사례가 없습니다. 일반적인 안전 수칙을 제안해 주세요."
+    is_empty = _is_empty_dispute(dispute_list)
+    
+    if is_empty:
+        # CASE B: 데이터 없음 - 명확하게 빈 값임을 표시
+        # 빈 문자열 또는 명시적 빈 값 표시를 사용하여 프롬프트에서 CASE B로 처리되도록 함
+        dispute_str = ""  # 빈 문자열로 설정하여 프롬프트에서 CASE B로 처리되도록 함
+        print(f"[Chain] Rules Input: Dispute evidence is empty - CASE B: 카테고리별 점검 가이드 항목 추가")
     else:
+        # CASE A: 데이터 있음 - 분쟁 사례 기반 방어 규칙 생성
         # 상위 3개만 사용하고 본문을 300자로 제한
         limited_dispute = dispute_list[:3]
         formatted_data = _format_evidence_list_to_string(limited_dispute)
         # 본문을 더 짧게 만들기 위해 추가 처리
         dispute_str = formatted_data.get("source","")
-        # 각 문서의 본문을 300자로 제한 (이미 _format_evidence_list_to_string에서 500자로 제한되어 있지만, 더 줄이기)
-        lines = dispute_str.split("\n\n")
-        shortened_lines = []
-        for line in lines:
-            if "본문:" in line:
-                # 본문 부분만 300자로 제한
-                parts = line.split("본문:")
-                if len(parts) == 2:
-                    body = parts[1].strip()[:300]
-                    shortened_lines.append(parts[0] + "본문: " + body)
+        
+        # 포매팅 결과가 빈 값 메시지인지 확인 (추가 안전장치)
+        if not dispute_str or dispute_str.strip() in ["검색된 참고 문서가 없습니다.", "검색된 유사 분쟁 사례가 없습니다."]:
+            # 실제로 빈 값으로 판단하여 CASE B로 처리
+            dispute_str = ""
+            print(f"[Chain] Rules Input: Formatted result is empty message - CASE B: 카테고리별 점검 가이드 항목 추가")
+        else:
+            # 각 문서의 본문을 300자로 제한 (이미 _format_evidence_list_to_string에서 500자로 제한되어 있지만, 더 줄이기)
+            lines = dispute_str.split("\n\n")
+            shortened_lines = []
+            for line in lines:
+                if "본문:" in line:
+                    # 본문 부분만 300자로 제한
+                    parts = line.split("본문:")
+                    if len(parts) == 2:
+                        body = parts[1].strip()[:300]
+                        shortened_lines.append(parts[0] + "본문: " + body)
+                    else:
+                        shortened_lines.append(line)
                 else:
                     shortened_lines.append(line)
-            else:
-                shortened_lines.append(line)
-        dispute_str = "\n\n".join(shortened_lines)
-        print(f"[Chain] Rules Input: Formatted dispute_str length={len(dispute_str)} (limited to top 3, 300 chars per body)")
+            dispute_str = "\n\n".join(shortened_lines)
+            print(f"[Chain] Rules Input: Formatted dispute_str length={len(dispute_str)} (limited to top 3, 300 chars per body) - CASE A: 방어 규칙 생성")
     
     return {
         "user_json": user_json,
@@ -373,6 +473,14 @@ def create_pydantic_output_parser(pydantic_model: Any, chain_name: str = "Unknow
                 parsed_json = json.loads(json_str)
                 print(f"[Chain][{chain_name}] JSON parse successful, keys: {list(parsed_json.keys()) if isinstance(parsed_json, dict) else 'not a dict'}")
                 
+                # Rules 체인 특화: rules가 빈 배열이면 경고 (토큰 제한으로 잘린 가능성)
+                if chain_name == "Rules" and isinstance(parsed_json, dict):
+                    rules = parsed_json.get("rules", [])
+                    if not rules or len(rules) == 0:
+                        print(f"[Chain][{chain_name}] WARNING: rules array is empty! This may indicate response was truncated.")
+                        if finish_reason in ["length", "max_tokens"]:
+                            print(f"[Chain][{chain_name}] ERROR: Response was truncated and rules array is empty. This is likely a token limit issue.")
+                
                 # Deposit 체인 특화 확인
                 if chain_name == "Deposit" and isinstance(parsed_json, dict):
                     deposit_amount = parsed_json.get("deposit_amount")
@@ -403,6 +511,18 @@ def create_pydantic_output_parser(pydantic_model: Any, chain_name: str = "Unknow
             
             # 3. Pydantic 모델로 변환
             try:
+                # Rules 체인 특화: rules가 빈 배열이고 응답이 잘린 경우 에러 메시지 개선
+                if chain_name == "Rules" and isinstance(parsed_json, dict):
+                    rules = parsed_json.get("rules", [])
+                    if not rules or len(rules) == 0:
+                        if finish_reason in ["length", "max_tokens"]:
+                            raise ValueError(
+                                f"[Rules] Response was truncated (finish_reason={finish_reason}) and rules array is empty. "
+                                f"This indicates the LLM did not generate any rules before hitting the token limit. "
+                                f"Consider: 1) Increasing max_tokens, 2) Simplifying the prompt, 3) Checking if category matching failed. "
+                                f"Parsed JSON: {json.dumps(parsed_json, ensure_ascii=False)[:500]}"
+                            )
+                
                 result = pydantic_model.model_validate(parsed_json)
                 print(f"[Chain][{chain_name}] Pydantic validation successful")
                 if chain_name == "Deposit":

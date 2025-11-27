@@ -13,8 +13,6 @@ class AgentInput(BaseModel):
     bought_at: Optional[str] = None
     
     # RAG 및 Batch 요약 결과 주입
-    rag_summary: Optional[str] = Field(None, description="RAG 검색 결과 요약")
-    batch_summary: Optional[Dict[str, Any]] = Field(None, description="S3 배치 요약 결과")
     rag_analysis_report: Optional[Dict[str, Any]] = Field(None, description="RAG 분석 리포트")
     evidence: Optional[List[Dict[str, Any]]] = Field(None, description=" 요약 전 시장 데이터 원본 RAG 증거 목록")
     used_evidence: Optional[List[Dict[str, Any]]] = Field(None, description="중고가 검색 결과 (보증금 산정용)")
