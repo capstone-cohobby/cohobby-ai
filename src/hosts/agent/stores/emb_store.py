@@ -171,14 +171,22 @@ class DisputeIndex:
 
         docs = results.get("documents", [[]])[0]
         metas = results.get("metadatas", [[]])[0]
-        
+        dists = results.get("distances", [[]])[0]
+        if not dists or len(dists) < len(docs):
+            dists = list(dists) + [None] * (len(docs) - len(dists))
         out = []
-        for doc, meta in zip(docs, metas):
+        for doc, meta, dist in zip(docs, metas, dists):
+            score = None
+            if dist is not None:
+                # 그냥 -dist 로 뒤집어서 "클수록 좋은 값"으로 사용
+                score = -dist
+
             item = {
                 "content": doc,
                 "source": "dispute",
-                **meta
-            }
+                "score": score,   # 🔹 여기 추가
+                **meta,
+         }
             out.append(item)
             
         return out

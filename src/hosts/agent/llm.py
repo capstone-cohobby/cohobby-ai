@@ -21,21 +21,17 @@ def _create_chat_model(
     provider = provider.lower()
     
     if provider == "openai":
+        # JSON Mode 활성화 (GPT-4o가 JSON을 content에 반환하도록 강제)
+        # 단, 프롬프트에서도 JSON 출력을 명시해야 함
         return ChatOpenAI(
             openai_api_key=api_key,
             model=model_name,
             temperature=temperature,
             max_tokens=max_tokens,
             timeout=timeout,
-        )
-    
-    elif provider == "anthropic":
-        return ChatAnthropic(
-            anthropic_api_key=api_key,
-            model=model_name,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout=timeout,
+            model_kwargs={
+                "response_format": {"type": "json_object"}  # JSON Mode 강제
+            }
         )
     
     # (참고) Google Gemini 추가 시
@@ -48,7 +44,7 @@ def _create_chat_model(
     #     )
         
     else:
-        raise ValueError(f"지원하지 않는 LLM 프로바이더: {provider}")
+        raise ValueError(f"지원하지 않는 LLM 프로바이더: {provider}. 현재는 'openai'만 지원합니다.")
 
 # ------------------------------------------------------------
 # 1) 판정/결정 체인용 LLM
