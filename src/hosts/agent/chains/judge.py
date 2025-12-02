@@ -235,12 +235,19 @@ def _format_evidence_list_to_string(evidence_list: List[Dict[str, Any]]) -> Dict
     return {"source": "\n\n".join(formatted_summaries)}
 
 def _prepare_price_input(ai: AgentInput) -> Dict[str, str]:
-    """[Price] 가격 결정 체인용 입력: User Info만 (RAG 증거 제외)"""
-    # 1. 사용자 입력 (상품명, 상태 등) - RAG 증거 제외
-    user_data = ai.model_dump_json(exclude={"evidence", "used_evidence", "dispute_evidence", "rag_analysis_report", "rag_summary"})
+    """[Price] 가격 결정 체인용 입력: 최소 정보만 (LLM 지식만으로 판단)"""
+    # 최소한의 상품 정보만 추출 (name, category, condition만)
+    minimal_info = {
+        "name": ai.name if hasattr(ai, "name") else None,
+        "category": ai.category if hasattr(ai, "category") else None,
+        "condition": ai.condition if hasattr(ai, "condition") else None
+    }
+    # None 값 제거
+    minimal_info = {k: v for k, v in minimal_info.items() if v is not None}
+    user_data = json.dumps(minimal_info, ensure_ascii=False)
     
     # [검증] Price 체인에 전달되는 데이터 확인
-    print(f"[Chain] Price Input: RAG 증거 없이 사용자 정보만 전달 (RAG-free mode)")
+    print(f"[Chain] Price Input: 최소 정보만 전달 (LLM 지식 기반 판단 모드)")
 
     return {
         "user_json": user_data
@@ -248,28 +255,22 @@ def _prepare_price_input(ai: AgentInput) -> Dict[str, str]:
 
 # [신규 Helper] Deposit 체인용 입력 포매터
 def _prepare_deposit_input(ai_input: AgentInput) -> Dict[str, str]:
-    """AgentInput에서 중고가 정보만 꺼내 문자열로 변환 (분쟁 사례 제외 - 토큰 절약)"""
-    user_json = ai_input.model_dump_json(exclude={"evidence", "used_evidence", "dispute_evidence","rag_analysis_report","rag_summary"})
-    
-    # used_evidence 필드에서 중고가 정보만 가져옴 (분쟁 사례 제외)
-    used_list = getattr(ai_input, "used_evidence", None) or []
+    """[Deposit] 보증금 결정 체인용 입력: 최소 정보만 (LLM 지식만으로 판단)"""
+    # 최소한의 상품 정보만 추출 (name, category, condition만)
+    minimal_info = {
+        "name": ai_input.name if hasattr(ai_input, "name") else None,
+        "category": ai_input.category if hasattr(ai_input, "category") else None,
+        "condition": ai_input.condition if hasattr(ai_input, "condition") else None
+    }
+    # None 값 제거
+    minimal_info = {k: v for k, v in minimal_info.items() if v is not None}
+    user_json = json.dumps(minimal_info, ensure_ascii=False)
     
     # [검증] Deposit 체인에 전달되는 데이터 확인
-    print(f"[Chain] Deposit Input: used_evidence count={len(used_list)}")
-    if used_list:
-        print(f"[Chain] Deposit Input: First used_evidence sample - {str(used_list[0])[:100]}...")
-    
-    # 중고가 정보 포매팅
-    if not used_list:
-        used_price_str = "검색된 중고가 정보가 없습니다."
-    else:
-        formatted_used = _format_evidence_list_to_string(used_list)
-        used_price_str = formatted_used.get("source","")
-        print(f"[Chain] Deposit Input: Formatted used_price_str length={len(used_price_str)}")
+    print(f"[Chain] Deposit Input: 최소 정보만 전달 (LLM 지식 기반 판단 모드, 중고가 정보 제외)")
     
     return {
-        "user_json": user_json,
-        "used_price_evidence_str": used_price_str
+        "user_json": user_json
     }
 
 # [신규 Helper] Rules 체인용 입력 포매터 (기존 유지)
