@@ -167,6 +167,13 @@ async def retrieve_all_node(state: GraphState) -> GraphState:
     norm_internal = [normalize_doc(d, "internal") for d in (internal_docs or [])]
     norm_web = [normalize_doc(d, "web") for d in (web_docs or [])]
     
+    # [검증] 정규화된 내부 데이터 확인
+    print(f"[Graph] Normalized: {len(norm_internal)} internal, {len(norm_web)} web")
+    if norm_internal:
+        sample = norm_internal[0]
+        print(f"[Graph] Normalized internal sample: title='{sample.get('title', 'N/A')[:50]}', price={sample.get('price', 'N/A')}, "
+              f"has_snippet={bool(sample.get('snippet'))}, has_content={bool(sample.get('content'))}, source={sample.get('source')}")
+    
     # (2) 병합 (중복 제거 및 점수 기반 정렬)
     # merge_evidence 함수 내부에서 중복 제거나 정렬을 수행한다고 가정
     # 만약 merge_evidence가 정규화된 것을 받지 않는다면, 

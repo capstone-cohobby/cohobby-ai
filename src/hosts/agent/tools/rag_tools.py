@@ -11,9 +11,14 @@ _INTERNAL_IDX = ChromaHybridIndex("cohobby_internal")  # 내부 데이터
 _DISPUTE_IDX = DisputeIndex("cohobby_dispute")    # 분쟁 사례 데이터
 
 async def retrieve_internal(query: str, top_k=10) -> List[Dict[str, Any]]:
-
+    """Chroma 내부 DB에서 대여 관련 게시물 검색"""
     # 1차 후보 넓게 뽑기
     cands = _INTERNAL_IDX.search(query, top_k=top_k)
+    
+    print(f"[RAG] retrieve_internal: Found {len(cands)} candidates from Chroma for query='{query}'")
+    if cands:
+        print(f"[RAG] retrieve_internal: First candidate keys={list(cands[0].keys())}")
+        print(f"[RAG] retrieve_internal: First candidate has snippet={bool(cands[0].get('snippet'))}, content={bool(cands[0].get('content'))}, price={bool(cands[0].get('price'))}")
 
     # 카테고리/타이틀 필터 & '대여|렌탈' 가중, 유사도 기반 곱하기 가중치 방식 적용
     def score(doc):
@@ -58,6 +63,11 @@ async def retrieve_internal(query: str, top_k=10) -> List[Dict[str, Any]]:
     # source='internal' 보존
     for d in uniq:
         d["source"] = "internal"
+    
+    print(f"[RAG] retrieve_internal: Returning {len(uniq)} internal docs after filtering")
+    if uniq:
+        print(f"[RAG] retrieve_internal: Sample doc - title='{uniq[0].get('title', 'N/A')[:50]}', price={uniq[0].get('price', 'N/A')}, has_snippet={bool(uniq[0].get('snippet'))}, has_content={bool(uniq[0].get('content'))}")
+    
     return uniq
 
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
@@ -114,6 +124,8 @@ async def retrieve_external_web(queries: List[str] = None, query: str = None):
     
     # 대여 관련 키워드 (강화)
     RENTAL_KEYWORDS = ["대여", "렌탈", "대여료", "보증금", "하루", "일일", "대여합니다", "반납", "연체", "요금"]
+    # 개인 대여 키워드 (C2C 맥락 - 우대 대상)
+    PERSONAL_RENTAL_KEYWORDS = ["빌려드려요", "개인 대여", "1:1 거래", "개인간", "직거래", "개인이", "개인용", "개인용품"]
     # 구매/판매 관련 키워드
     PURCHASE_KEYWORDS = ["판매", "구매"]
     # 대여샵 도메인 패턴
@@ -150,17 +162,22 @@ async def retrieve_external_web(queries: List[str] = None, query: str = None):
         # 기본 점수
         base_score = r.get("score", 0.5) * 1.5  # has_rental == True 이므로 1.5배 적용
         
-        # 대여샵(업체) 가격 감지 및 점수 부스트
-        is_rental_shop = any(domain in url or domain in combined_text for domain in RENTAL_SHOP_DOMAINS)
-        if is_rental_shop:
-            base_score *= 2.0  # 대여샵 가격은 신뢰도가 높음 (2.0배)
-        elif "업체" in combined_text or "대여샵" in combined_text:
-            base_score *= 1.8  # 업체 언급이 있으면 1.8배
+        # 개인 대여 키워드 감지 및 점수 부스트 (C2C 맥락 우대)
+        has_personal_rental = any(kw in combined_text for kw in PERSONAL_RENTAL_KEYWORDS)
+        if has_personal_rental:
+            base_score *= 1.2  # 개인 대여 키워드가 있으면 1.2배 추가 부스트
         
-        # 커뮤니티 대여글 감지 (당근, 중고나라, 네이버 카페)
+        # 커뮤니티 대여글 감지 (당근, 중고나라, 네이버 카페) - C2C 맥락에서 우선
         is_community = any(domain in url for domain in ["daangn.com", "joongnara.co.kr", "cafe.naver.com"])
         if is_community:
-            base_score *= 1.3  # 커뮤니티 대여글은 실거래가로 신뢰도 높음
+            base_score *= 1.5  # 커뮤니티 대여글은 실거래가로 신뢰도 높음 (1.3 → 1.5로 증가)
+        
+        # 대여샵(업체) 가격 감지 및 점수 부스트 (커뮤니티보다 낮게)
+        is_rental_shop = any(domain in url or domain in combined_text for domain in RENTAL_SHOP_DOMAINS)
+        if is_rental_shop:
+            base_score *= 1.8  # 대여샵 가격은 참고용 (2.0 → 1.8로 조정, 커뮤니티보다 낮게)
+        elif "업체" in combined_text or "대여샵" in combined_text:
+            base_score *= 1.6  # 업체 언급이 있으면 1.6배 (1.8 → 1.6으로 조정)
         
         results.append({
             "title": r["title"],
@@ -171,16 +188,18 @@ async def retrieve_external_web(queries: List[str] = None, query: str = None):
             "is_rental": True,  # 여기까지 온 건 전부 대여 문맥 있음
             "is_rental_shop": is_rental_shop,  # 대여샵 여부
             "is_community": is_community,  # 커뮤니티 여부
+            "is_personal_rental": has_personal_rental,  # 개인 대여 키워드 여부
         })
     
     # 점수 순으로 정렬
     results.sort(key=lambda x: x["score"], reverse=True)
     rental_shop_count = sum(1 for r in results if r.get("is_rental_shop"))
     community_count = sum(1 for r in results if r.get("is_community"))
+    personal_rental_count = sum(1 for r in results if r.get("is_personal_rental"))
     
     # 상세 로그 출력 (디버깅용)
     print(f"[RAG] retrieve_external_web: Filtered to {len(results)} rental-related results "
-          f"(rental_shops={rental_shop_count}, community={community_count}) from {len(all_results)} total")
+          f"(rental_shops={rental_shop_count}, community={community_count}, personal_rental_keywords={personal_rental_count}) from {len(all_results)} total")
     
     # 샘플 결과 출력 (디버깅용)
     if results:
@@ -246,10 +265,10 @@ async def retrieve_sale_price_web(query: str):
 def merge_evidence(internal: List[Dict], web: List[Dict], top_k: int = 8) -> List[Dict[str, Any]]:
     """내부와 웹 증거를 병합하되, 내부 데이터(가격 정보 포함)에 우선순위 부여
     
-    3단계 우선순위:
+    3단계 우선순위 (C2C 개인간 대여 맥락):
     1. 내부 DB (가장 우선)
-    2. 대여샵(업체) 가격
-    3. 커뮤니티 대여글(실거래가)
+    2. 커뮤니티 대여글(실거래가) - C2C 맥락에서 우선
+    3. 대여샵(업체) 가격 - 참고용
     
     [중요] 웹 검색 결과 중 is_rental=True인 것만 price evidence로 사용합니다.
     구매/판매 web 결과는 아예 price evidence에 포함되지 않습니다.
@@ -269,28 +288,28 @@ def merge_evidence(internal: List[Dict], web: List[Dict], top_k: int = 8) -> Lis
     # 2) 웹은 is_rental == True 만 가격 evidence로 사용 (하드 필터)
     rental_web = [d for d in (web or []) if d.get("is_rental") is True]
     
-    # 웹 결과를 대여샵과 커뮤니티로 분류
-    rental_shops = [d for d in rental_web if d.get("is_rental_shop") is True]
-    community_rentals = [d for d in rental_web if d.get("is_community") is True and not d.get("is_rental_shop")]
+    # 웹 결과를 커뮤니티와 대여샵으로 분류 (C2C 맥락에서 커뮤니티 우선)
+    community_rentals = [d for d in rental_web if d.get("is_community") is True]
+    rental_shops = [d for d in rental_web if d.get("is_rental_shop") is True and not d.get("is_community")]
     other_rentals = [d for d in rental_web if not d.get("is_rental_shop") and not d.get("is_community")]
     
     def _web_score(doc):
         base_score = float(doc.get("score") or 0.5)
-        # 대여샵 가격은 가장 높은 우선순위
-        if doc.get("is_rental_shop"):
-            base_score += 0.4  # 대여샵 가격 +0.4
-        # 커뮤니티 대여글은 실거래가로 신뢰도 높음
-        elif doc.get("is_community"):
-            base_score += 0.2  # 커뮤니티 대여글 +0.2
+        # 커뮤니티 대여글은 C2C 맥락에서 가장 높은 우선순위 (실거래가)
+        if doc.get("is_community"):
+            base_score += 0.4  # 커뮤니티 대여글 +0.4 (0.2 → 0.4로 증가)
+        # 대여샵 가격은 참고용 (커뮤니티보다 낮게)
+        elif doc.get("is_rental_shop"):
+            base_score += 0.2  # 대여샵 가격 +0.2 (0.4 → 0.2로 조정)
         else:
             base_score += 0.1  # 기타 대여 관련 웹 결과 +0.1
         return base_score
     
-    # 대여샵 > 커뮤니티 > 기타 순으로 정렬
-    rental_shops_sorted = sorted(rental_shops, key=_web_score, reverse=True)
+    # 커뮤니티 > 대여샵 > 기타 순으로 정렬 (C2C 맥락 반영)
     community_sorted = sorted(community_rentals, key=_web_score, reverse=True)
+    rental_shops_sorted = sorted(rental_shops, key=_web_score, reverse=True)
     other_sorted = sorted(other_rentals, key=_web_score, reverse=True)
-    rental_web_sorted = rental_shops_sorted + community_sorted + other_sorted
+    rental_web_sorted = community_sorted + rental_shops_sorted + other_sorted
     
     # 3) 중복 제거 및 병합
     merged = internal_sorted + rental_web_sorted

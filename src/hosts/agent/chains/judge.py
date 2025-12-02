@@ -282,11 +282,40 @@ def _prepare_price_input(ai: AgentInput) -> Dict[str, str]:
     
     # [검증] Price 체인에 전달되는 데이터 확인
     print(f"[Chain] Price Input: evidence count={len(ev_list)}, used_evidence count={len(used_list)}, report exists={bool(report)}")
+    
+    # [근거 희소성 보정] Evidence가 부족한 경우 경고
+    if len(ev_list) < 3:
+        print(f"[Chain] Price Input: WARNING - Low evidence count ({len(ev_list)}). "
+              f"LLM should use similar category personal rental cases as reference.")
+    
     if ev_list:
-        print(f"[Chain] Price Input: First evidence sample - {str(ev_list[0])[:100]}...")
+        first_ev = ev_list[0]
+        print(f"[Chain] Price Input: First evidence sample - title='{first_ev.get('title', 'N/A')[:50]}', "
+              f"source={first_ev.get('source', 'unknown')}, price={first_ev.get('price', 'N/A')}, "
+              f"has_snippet={bool(first_ev.get('snippet'))}, has_content={bool(first_ev.get('content'))}")
         # evidence의 source 확인 (대여 시장만 있어야 함)
         ev_sources = {doc.get("source", "unknown") for doc in ev_list}
-        print(f"[Chain] Price Input: Evidence sources: {ev_sources}")
+        internal_count = sum(1 for doc in ev_list if doc.get("source") == "internal")
+        web_count = sum(1 for doc in ev_list if doc.get("source") == "web")
+        community_count = sum(1 for doc in ev_list if doc.get("is_community"))
+        rental_shop_count = sum(1 for doc in ev_list if doc.get("is_rental_shop"))
+        print(f"[Chain] Price Input: Evidence sources: {ev_sources} "
+              f"(internal={internal_count}, web={web_count}, community={community_count}, rental_shops={rental_shop_count})")
+        
+        # 내부 데이터 샘플 출력
+        internal_samples = [doc for doc in ev_list if doc.get("source") == "internal"][:3]
+        if internal_samples:
+            print(f"[Chain] Price Input: Internal evidence samples ({len(internal_samples)}):")
+            for i, doc in enumerate(internal_samples, 1):
+                print(f"  [{i}] title='{doc.get('title', 'N/A')[:50]}', price={doc.get('price', 'N/A')}, "
+                      f"snippet_len={len(doc.get('snippet', '') or '')}, content_len={len(doc.get('content', '') or '')}")
+        
+        # 커뮤니티 대여글 샘플 출력 (C2C 맥락)
+        community_samples = [doc for doc in ev_list if doc.get("is_community")][:2]
+        if community_samples:
+            print(f"[Chain] Price Input: Community rental samples ({len(community_samples)}):")
+            for i, doc in enumerate(community_samples, 1):
+                print(f"  [{i}] title='{doc.get('title', 'N/A')[:50]}', url={doc.get('url', 'N/A')[:60]}")
 
     return {
         "user_json": user_data,

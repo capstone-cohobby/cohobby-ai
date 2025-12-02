@@ -83,16 +83,28 @@ class ChromaHybridIndex:
             m = dict(meta)
             m["score"] = score
             # [중요] 문서 텍스트를 content/snippet 필드로 추가 (메타데이터에 없을 경우 대비)
-            # 메타데이터에 snippet이 없으면 doc 텍스트를 사용
-            if "snippet" not in m and "content" not in m:
-                m["content"] = doc
-                m["snippet"] = doc
-            # 메타데이터에 snippet은 있지만 content가 없으면 snippet을 content로도 사용
-            elif "snippet" in m and "content" not in m:
-                m["content"] = m.get("snippet", doc)
-            # 메타데이터에 content는 있지만 snippet이 없으면 content를 snippet으로도 사용
-            elif "content" in m and "snippet" not in m:
-                m["snippet"] = m.get("content", doc)
+            # 메타데이터의 snippet/content가 비어있거나 없으면 doc 텍스트를 사용
+            existing_snippet = m.get("snippet", "").strip() if m.get("snippet") else ""
+            existing_content = m.get("content", "").strip() if m.get("content") else ""
+            doc_text = (doc or "").strip()
+            
+            # snippet 처리: 없거나 비어있으면 doc 텍스트 사용
+            if not existing_snippet:
+                m["snippet"] = doc_text
+            else:
+                m["snippet"] = existing_snippet
+            
+            # content 처리: 없거나 비어있으면 snippet 또는 doc 텍스트 사용
+            if not existing_content:
+                m["content"] = m.get("snippet") or doc_text
+            else:
+                m["content"] = existing_content
+            
+            # snippet과 content가 모두 비어있으면 doc 텍스트를 사용
+            if not m.get("snippet") and not m.get("content") and doc_text:
+                m["snippet"] = doc_text
+                m["content"] = doc_text
+            
             out.append(m)
         out.sort(key=lambda x: x["score"], reverse=True)
         return out
