@@ -1,7 +1,7 @@
 # graph.py
 import json
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from langgraph.graph import StateGraph, END
 from .chains.adapters import normalize_doc
@@ -46,6 +46,7 @@ def check_verdict_cache(state: GraphState) -> GraphState:
     return state
 
 async def _build_rag_query(state: GraphState) -> str:
+    """기본 대여 검색 쿼리 생성"""
     inp = state["inp"]
     name = (inp.get("name") or "").strip()
     cat = (inp.get("category") or "").strip()
@@ -60,6 +61,42 @@ async def _build_rag_query(state: GraphState) -> str:
     print(f"[Graph] RAG Query = {q}")  # 쿼리 로깅
     
     return q
+
+async def _build_community_rental_queries(state: GraphState) -> List[str]:
+    """커뮤니티 대여글 검색용 쿼리 세트 생성 (당근, 중고나라, 네이버 카페)"""
+    inp = state["inp"]
+    name = (inp.get("name") or "").strip()
+    cat = (inp.get("category") or "").strip()
+    base = f"{name} {cat}".strip()
+    
+    # 커뮤니티 대여글 검색 쿼리 세트 (병렬 검색용)
+    queries = [
+        f"{base} 대여 site:cafe.naver.com",
+        f"{base} 대여 중고나라",
+        f"{base} 대여 당근",
+        f"{base} 하루 대여",
+        f"{cat} 대여 후기" if cat else f"{name} 대여 후기"
+    ]
+    
+    print(f"[Graph] Community Rental Queries = {queries}")
+    return queries
+
+async def _build_rental_shop_queries(state: GraphState) -> List[str]:
+    """대여샵(업체) 가격 검색용 쿼리 세트 생성"""
+    inp = state["inp"]
+    name = (inp.get("name") or "").strip()
+    cat = (inp.get("category") or "").strip()
+    base = f"{name} {cat}".strip()
+    
+    # 대여샵 가격 검색 쿼리
+    queries = [
+        f"{base} 렌탈 업체 가격",
+        f"{base} 렌탈 요금",
+        f"{cat} 렌탈 가격 하루" if cat else f"{name} 렌탈 가격 하루"
+    ]
+    
+    print(f"[Graph] Rental Shop Queries = {queries}")
+    return queries
 
 async def _build_sale_query(state: GraphState) -> str:
     """'중고/판매' 쿼리 생성기"""
@@ -94,11 +131,17 @@ async def retrieve_all_node(state: GraphState) -> GraphState:
     q_price = await _build_rag_query(state)      # 예: "맥북 프로 대여"
     q_sale = await _build_sale_query(state)      # 예: "맥북 프로" (중고가 검색용)
     q_dispute = await _build_dispute_query(state) # 예: "맥북 프로 디지털가전"
+    
+    # [신규] 커뮤니티 대여글 + 대여샵 가격 쿼리 생성
+    community_queries = await _build_community_rental_queries(state)
+    rental_shop_queries = await _build_rental_shop_queries(state)
+    # 모든 웹 검색 쿼리 합치기
+    all_web_queries = [q_price] + community_queries + rental_shop_queries
 
     # 2. 4개 채널 병렬 실행
-    # (내부 DB, 외부 웹, 중고가, 분쟁 DB)
+    # (내부 DB, 외부 웹(3단계 구조), 중고가, 분쟁 DB)
     task_internal = retrieve_internal(q_price)
-    task_web = retrieve_external_web(q_price)
+    task_web = retrieve_external_web(queries=all_web_queries)  # [신규] 여러 쿼리 병렬 검색
     task_used = retrieve_used_price_web(q_sale)  # [신규] 중고가 검색 추가
     task_dispute = retrieve_dispute_cases(q_dispute)
     
@@ -278,10 +321,14 @@ async def finalize_parallel(state: GraphState) -> GraphState:
         # 결과 저장
         if price_result:
             state["price_decision"] = price_result
-            set_verdict(state["signature"], price_result)
-            print("[Graph] Finalize Parallel: Price OK")
+            # [중요] 'reasonable'일 때만 캐시 저장 (fallback으로 갈 수 있는 경우는 저장하지 않음)
+            if price_result.decision == "reasonable":
+                set_verdict(state["signature"], price_result)
+                print(f"[Graph] Finalize Parallel: Price OK - decision={price_result.decision}, confidence={price_result.confidence}")
+            else:
+                print(f"[Graph] Finalize Parallel: Price OK but decision={price_result.decision}, confidence={price_result.confidence} - Will trigger fallback")
         else:
-            print("[Graph] Finalize Parallel: WARNING - price_decision is None")
+            print("[Graph] Finalize Parallel: WARNING - price_decision is None - Will trigger fallback")
         
         if deposit_result:
             state["deposit_decision"] = deposit_result
@@ -432,18 +479,31 @@ def gate_after_cache(state: GraphState) -> str:
 
 # [신규] 가격 결정 후 Fallback 여부 분기
 def gate_after_price(state: GraphState) -> str:
-    """가격 결정의 신뢰도에 따라 Fallback 실행 여부 결정"""
+    """가격 결정의 신뢰도에 따라 Fallback 실행 여부 결정
+    
+    - decision == "reasonable"이고 confidence >= 0.6: END (캐시 저장)
+    - 그 외 (None, "uncertain", "unreasonable", 또는 confidence < 0.6): Fallback (ROI 방식)
+    """
     price_decision = state.get("price_decision")
     
-    if price_decision and price_decision.decision == "reasonable":
-        print("[Graph] Gate: Price is 'reasonable'. Caching and Ending.")
-        # [신규] 'reasonable'일 때만 캐시 저장
+    # price_decision이 없으면 fallback
+    if not price_decision:
+        print("[Graph] Gate: price_decision is None. Triggering Fallback (ROI Deriver).")
+        return "fallback_sale_search"
+    
+    decision = price_decision.decision
+    confidence = price_decision.confidence
+    
+    # "reasonable"이고 confidence가 충분히 높으면 END
+    if decision == "reasonable" and confidence >= 0.6:
+        print(f"[Graph] Gate: Price is 'reasonable' (confidence={confidence}). Caching and Ending.")
+        # [중요] 'reasonable'일 때만 캐시 저장 (이미 finalize_parallel에서 저장했지만 안전장치)
         set_verdict(state["signature"], price_decision)
         print("[Cache] SET OK (Reasonable):", state["signature"])
         return "END"
     else:
-        decision_str = price_decision.decision if price_decision else "None"
-        print(f"[Graph] Gate: Price is '{decision_str}'. Triggering Fallback Sale RAG.")
+        # "uncertain", "unreasonable", 또는 confidence가 낮은 경우 fallback
+        print(f"[Graph] Gate: Price decision='{decision}', confidence={confidence}. Triggering Fallback (ROI Deriver).")
         return "fallback_sale_search"
 # --- 그래프 배선 ---
 
