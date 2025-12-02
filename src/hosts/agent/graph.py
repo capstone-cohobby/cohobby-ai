@@ -524,6 +524,12 @@ def gate_after_price(state: GraphState) -> str:
             print("[Graph] Gate: price_decision is None but rental evidence exists. This should not happen, but ending anyway.")
             return "END"
     
+    # price_decision이 있더라도 price 객체가 None이거나 point가 None이면 fallback
+    price_obj = price_decision.price if price_decision else None
+    if not price_obj or price_obj.point is None:
+        print(f"[Graph] Gate: price_decision exists but price is None or point is None. Triggering Fallback (ROI Deriver).")
+        return "fallback_sale_search"
+    
     decision = price_decision.decision
     confidence = price_decision.confidence
     
