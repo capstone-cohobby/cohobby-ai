@@ -488,30 +488,64 @@ def gate_after_cache(state: GraphState) -> str:
 def gate_after_price(state: GraphState) -> str:
     """가격 결정의 신뢰도에 따라 Fallback 실행 여부 결정
     
+    [개선 로직]
+    1. evidence 안에 '대여 근거'가 있는지 체크
+    2. 대여 evidence가 있으면 웬만하면 ROI로 보내지 않고 RAG 결과를 신뢰
+    3. 대여 evidence가 아예 없을 때만 ROI fallback
+    
     - decision == "reasonable"이고 confidence >= 0.6: END (캐시 저장)
-    - 그 외 (None, "uncertain", "unreasonable", 또는 confidence < 0.6): Fallback (ROI 방식)
+    - decision == "reasonable"이지만 confidence < 0.6이어도, 대여 evidence가 있으면 END
+    - 대여 evidence가 없고 decision이 "uncertain"/"unreasonable"이거나 confidence < 0.6: Fallback (ROI 방식)
     """
     price_decision = state.get("price_decision")
+    evidence = state.get("evidence", [])
     
-    # price_decision이 없으면 fallback
+    # 1. evidence 안에 '대여 근거'가 있는지 체크
+    has_rental_evidence = False
+    if evidence:
+        for d in evidence:
+            # 내부 데이터 (source == "internal")는 대여 데이터로 간주
+            if d.get("source") == "internal":
+                has_rental_evidence = True
+                break
+            # 웹 데이터 중 커뮤니티 대여글 또는 대여샵
+            if d.get("is_community") or d.get("is_rental_shop") or d.get("is_rental"):
+                has_rental_evidence = True
+                break
+    
+    # price_decision이 없으면
     if not price_decision:
-        print("[Graph] Gate: price_decision is None. Triggering Fallback (ROI Deriver).")
-        return "fallback_sale_search"
+        # evidence도 없고 price도 없으면 어쩔 수 없이 ROI
+        if not has_rental_evidence:
+            print("[Graph] Gate: price_decision is None and no rental evidence. Triggering Fallback (ROI Deriver).")
+            return "fallback_sale_search"
+        else:
+            # 대여 evidence는 있는데 price_decision이 없는 경우는 이상하지만, 일단 END 처리
+            print("[Graph] Gate: price_decision is None but rental evidence exists. This should not happen, but ending anyway.")
+            return "END"
     
     decision = price_decision.decision
     confidence = price_decision.confidence
     
-    # "reasonable"이고 confidence가 충분히 높으면 END
-    if decision == "reasonable" and confidence >= 0.6:
-        print(f"[Graph] Gate: Price is 'reasonable' (confidence={confidence}). Caching and Ending.")
-        # [중요] 'reasonable'일 때만 캐시 저장 (이미 finalize_parallel에서 저장했지만 안전장치)
-        set_verdict(state["signature"], price_decision)
-        print("[Cache] SET OK (Reasonable):", state["signature"])
-        return "END"
-    else:
-        # "uncertain", "unreasonable", 또는 confidence가 낮은 경우 fallback
-        print(f"[Graph] Gate: Price decision='{decision}', confidence={confidence}. Triggering Fallback (ROI Deriver).")
+    # 2. RAG가 reasonable이면 그대로 끝
+    if decision == "reasonable":
+        # confidence 낮아도, 대여 evidence 있으면 그냥 신뢰하고 종료
+        if confidence >= 0.6 or has_rental_evidence:
+            print(f"[Graph] Gate: Price is 'reasonable' (confidence={confidence}, has_rental_evidence={has_rental_evidence}). Caching and Ending.")
+            set_verdict(state["signature"], price_decision)
+            print("[Cache] SET OK (Reasonable):", state["signature"])
+            return "END"
+    
+    # 3. 대여 evidence가 아예 없을 때만 ROI fallback
+    if not has_rental_evidence:
+        print(f"[Graph] Gate: No rental evidence found. decision='{decision}', confidence={confidence}. Triggering Fallback (ROI Deriver).")
         return "fallback_sale_search"
+    
+    # 4. 대여 evidence는 있는데 판단이 애매한 경우:
+    #    → RAG 결과를 그냥 그대로 쓰거나, confidence를 강제로 올려서 END 처리
+    print(f"[Graph] Gate: Rental evidence exists but decision='{decision}', confidence={confidence}. Using RAG result anyway (not sending to ROI).")
+    set_verdict(state["signature"], price_decision)
+    return "END"
 # --- 그래프 배선 ---
 
 graph = StateGraph(GraphState)
