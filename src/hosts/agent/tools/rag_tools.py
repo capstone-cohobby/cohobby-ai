@@ -26,7 +26,7 @@ async def retrieve_internal(query: str, top_k=10) -> List[Dict[str, Any]]:
         base_sim = float(doc.get("score", 0.0))
         
         # [Safety] 유사도가 너무 낮으면(예: 0.3 미만) 아예 가산점을 주지 않음 (샤이니 응원봉 방지)
-        if base_sim < 0.35:
+        if base_sim < 0.25:
             return base_sim
             
         s = base_sim
