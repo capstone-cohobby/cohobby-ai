@@ -428,21 +428,22 @@ def gate_after_cache(state: GraphState) -> str:
         return "finalize_parallel"
     return "retrieve_all"  # 캐시 미스 시 RAG 수행
 
-# [신규] 가격 결정 후 Fallback 여부 분기
+# 가격 결정 후 종료 (Fallback 제거 - RAG 없이 1번만 실행)
 def gate_after_price(state: GraphState) -> str:
-    """가격 결정의 신뢰도에 따라 Fallback 실행 여부 결정"""
+    """가격 결정 후 항상 종료 (Fallback 제거)"""
     price_decision = state.get("price_decision")
     
-    if price_decision and price_decision.decision == "reasonable":
-        print("[Graph] Gate: Price is 'reasonable'. Caching and Ending.")
-        # [신규] 'reasonable'일 때만 캐시 저장
-        set_verdict(state["signature"], price_decision)
-        print("[Cache] SET OK (Reasonable):", state["signature"])
-        return "END"
-    else:
+    if price_decision:
         decision_str = price_decision.decision if price_decision else "None"
-        print(f"[Graph] Gate: Price is '{decision_str}'. Triggering Fallback Sale RAG.")
-        return "fallback_sale_search"
+        print(f"[Graph] Gate: Price decision is '{decision_str}'. Ending (no fallback).")
+        # 'reasonable'일 때만 캐시 저장
+        if price_decision.decision == "reasonable":
+            set_verdict(state["signature"], price_decision)
+            print("[Cache] SET OK (Reasonable):", state["signature"])
+    else:
+        print("[Graph] Gate: No price decision. Ending (no fallback).")
+    
+    return "END"
 # --- 그래프 배선 ---
 
 graph = StateGraph(GraphState)
@@ -472,13 +473,10 @@ graph.add_edge("retrieve_all", "summarize_rag_evidence")
 #3. Merge Evidence -> RAG Summarizer
 graph.add_edge("summarize_rag_evidence", "finalize_parallel")
 
-# 4. [신규] 최종 결정 후 Fallback 분기
+# 4. 최종 결정 후 종료 (Fallback 제거 - 대여가 산정 1번만 실행)
 graph.add_conditional_edges("finalize_parallel", gate_after_price, {
-    "END": END, # 'reasonable'일 때
-    "fallback_sale_search": "retrieve_sale_price_node" # 'uncertain'일 때
+    "END": END  # 항상 종료 (Fallback 제거)
 })
-graph.add_edge("retrieve_sale_price_node", "derive_rental_price_node")
-graph.add_edge("derive_rental_price_node", END)
 
 # 컴파일
 app_graph = graph.compile()
