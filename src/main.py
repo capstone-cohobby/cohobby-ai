@@ -83,7 +83,7 @@ async def estimate_price(payload: AgentInput):
             rules=rules_res,
             cache_hit=state.get("cache_hit", False),
             error=state.get("error"),
-            evidence=state.get("evidence", []),
+            evidence=[],  # RAG 사용 안 함 - 외부 정보 없이 모델 지식만으로 판단
         )
     except Exception as e:
         logging.error("Pipeline failed for payload=%s", payload.model_dump(), exc_info=True)

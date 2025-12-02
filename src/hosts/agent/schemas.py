@@ -51,8 +51,9 @@ class PriceDecision(BaseModel):
     
     @model_validator(mode="after")
     def _coherence(self):
-        if self.decision == "reasonable" and self.confidence < 0.6:
-            raise ValueError("If decision is 'reasonable', confidence should be >= 0.6")
+        # 외부 정보 없이 판단하는 경우 신뢰도는 낮을 수 있으므로, 0.5 이상으로 완화
+        if self.decision == "reasonable" and self.confidence < 0.5:
+            raise ValueError("If decision is 'reasonable', confidence should be >= 0.5")
         if self.decision == "uncertain" and self.confidence > 0.8:
             raise ValueError("If decision is 'uncertain', confidence seems too high (>0.8)")
         if self.price is None:

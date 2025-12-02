@@ -532,6 +532,6 @@ async def run_once(payload: Dict[str, Any]) -> Dict[str, Any]:
         "rules": rules_res,
         "cache_hit": final_state.get("cache_hit", False),
         "error": final_state.get("error"),
-        "evidence": final_state.get("evidence", [])
+        "evidence": []  # RAG 사용 안 함 - 외부 정보 없이 모델 지식만으로 판단
     }
     return output
