@@ -149,7 +149,7 @@ def merge_evidence(internal: List[Dict], web: List[Dict], top_k: int = 8) -> Lis
     """내부와 웹 증거를 병합하되, 내부 데이터(가격 정보 포함)에 우선순위 부여
     웹 검색 결과 중 대여 관련이 아닌 구매/판매 게시물은 점수를 크게 낮춤"""
     merged = (internal or []) + (web or [])
-    seen, uniq = [], set()
+    seen, uniq = set(), []
     for d in merged:
         key = d.get("id") or d.get("listing_id") or d.get("title")
         if key and key in seen:
@@ -184,6 +184,13 @@ def merge_evidence(internal: List[Dict], web: List[Dict], top_k: int = 8) -> Lis
     uniq.sort(key=adjusted_score, reverse=True)
     return uniq[:top_k]
 
-async def retrieve_dispute_cases(query: str, top_k=5) -> List[Dict[str, Any]]:
-    cands = await asyncio.to_thread(_DISPUTE_IDX.search_rules, query=query, top_k=top_k)
+async def retrieve_dispute_cases(query: str, top_k=8) -> List[Dict[str, Any]]:
+    """분쟁 사례 검색 (강화: 카테고리 필터 없이 검색하여 비슷한 카테고리 분쟁도 포함)
+    
+    카테고리 필터를 사용하지 않고 쿼리 기반으로만 검색하여,
+    정확히 일치하지 않는 카테고리라도 관련 분쟁 사례를 찾을 수 있도록 함.
+    """
+    # category=None으로 전달하여 카테고리 필터를 사용하지 않음
+    # top_k를 8로 늘려 더 많은 결과를 가져옴
+    cands = await asyncio.to_thread(_DISPUTE_IDX.search_rules, query=query, category=None, top_k=top_k)
     return cands

@@ -166,14 +166,13 @@ class DisputeIndex:
     ) -> List[Dict[str, Any]]:
         """
         RAG 용 검색: 규칙 생성에 필요한 '딕셔너리 리스트'를 반환
+        카테고리 필터를 사용하지 않고 쿼리 기반으로만 검색하여 비슷한 카테고리 분쟁도 포함
         """
-        where_clause = {}
-        if category:
-            where_clause["category"] = category
+        # 카테고리 필터를 사용하지 않음 (category=None이면 필터 없이 검색)
+        # 이렇게 하면 정확히 일치하지 않는 카테고리라도 관련 분쟁 사례를 찾을 수 있음
+        where_clause = None
 
-        if not where_clause:
-            where_clause = None
-
+        # top_k를 더 크게 설정하여 더 많은 후보를 가져온 후 점수로 정렬
         results = self.col.query(
             query_texts=[query],
             n_results=top_k,
@@ -191,6 +190,20 @@ class DisputeIndex:
             if dist is not None:
                 # 그냥 -dist 로 뒤집어서 "클수록 좋은 값"으로 사용
                 score = -dist
+            
+            # 카테고리 매칭 여부에 따라 점수 조정
+            # 정확히 일치하는 카테고리는 높은 점수, 비슷한 카테고리도 포함되지만 점수는 낮음
+            doc_category = meta.get("category", "").lower() if meta else ""
+            if category:
+                category_lower = category.lower()
+                if doc_category == category_lower:
+                    # 정확히 일치하는 카테고리는 점수 증가
+                    if score is not None:
+                        score += 0.3
+                elif category_lower in doc_category or doc_category in category_lower:
+                    # 부분 일치하는 카테고리는 약간의 가산점
+                    if score is not None:
+                        score += 0.1
 
             item = {
                 "content": doc,
@@ -199,5 +212,7 @@ class DisputeIndex:
                 **meta,
          }
             out.append(item)
-            
-        return out
+        
+        # 점수 순으로 정렬하고 top_k만 반환
+        out.sort(key=lambda x: x.get("score") or 0.0, reverse=True)
+        return out[:top_k]

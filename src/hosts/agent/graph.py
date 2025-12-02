@@ -70,11 +70,13 @@ async def _build_sale_query(state: GraphState) -> str:
     return q
 
 async def _build_dispute_query(state: GraphState) -> str:
-    """분쟁 조정 사례 쿼리 생성기"""
+    """분쟁 조정 사례 쿼리 생성기 (강화: 비슷한 카테고리 분쟁도 검색)"""
     inp = state["inp"]
     name = (inp.get("name") or "").strip()
     category = (inp.get("category") or "").strip()
-    q = f"{name} {category} 분쟁 파손 하자".strip()
+    # 쿼리를 더 강화하여 비슷한 카테고리 분쟁도 검색되도록 함
+    # 분쟁 관련 키워드를 더 추가하고, 카테고리 없이도 검색 가능하도록 함
+    q = f"{name} {category} 분쟁 파손 하자 손상 배상 반납 연체".strip()
     print(f"[Graph] Dispute RAG Query = {q}")  # 쿼리 로깅
     return q
 
