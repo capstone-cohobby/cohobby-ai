@@ -73,17 +73,41 @@ async def retrieve_external_web(queries: List[str] = None, query: str = None):
     [중요] rental-price 단계에서는 '대여/렌탈' 언급 없는 문서는 아예 제외합니다.
     구매/판매 글은 Fallback 단계(retrieve_sale_price_web, retrieve_used_price_web)에서만 사용됩니다.
     """
+    # 커뮤니티 및 대여샵 도메인 우선 지정
+    PREFERRED_DOMAINS = [
+        "daangn.com",           # 당근마켓
+        "joongnara.co.kr",      # 중고나라
+        "cafe.naver.com",       # 네이버 카페
+        "tentmarket.co.kr",     # 텐트마켓
+        "campingbox.co.kr",     # 캠핑박스
+        "campingrental.co.kr",  # 캠핑렌탈
+        "rental",               # 렌탈 관련 도메인
+    ]
+    
     # 쿼리 리스트가 있으면 병렬 검색, 단일 쿼리면 단일 검색
     if queries:
-        # 여러 쿼리를 병렬로 실행
-        tasks = [asyncio.to_thread(tavily_client.search, q, max_results=5) for q in queries]
+        # 여러 쿼리를 병렬로 실행 (include_domains로 우선 도메인 지정)
+        tasks = [
+            asyncio.to_thread(
+                tavily_client.search, 
+                q, 
+                max_results=5,
+                include_domains=PREFERRED_DOMAINS
+            ) 
+            for q in queries
+        ]
         search_results = await asyncio.gather(*tasks)
         # 모든 결과를 하나로 합침
         all_results = []
         for res in search_results:
             all_results.extend(res.get("results", []))
     elif query:
-        res = await asyncio.to_thread(tavily_client.search, query, max_results=8)
+        res = await asyncio.to_thread(
+            tavily_client.search, 
+            query, 
+            max_results=8,
+            include_domains=PREFERRED_DOMAINS
+        )
         all_results = res.get("results", [])
     else:
         return []
@@ -153,8 +177,30 @@ async def retrieve_external_web(queries: List[str] = None, query: str = None):
     results.sort(key=lambda x: x["score"], reverse=True)
     rental_shop_count = sum(1 for r in results if r.get("is_rental_shop"))
     community_count = sum(1 for r in results if r.get("is_community"))
+    
+    # 상세 로그 출력 (디버깅용)
     print(f"[RAG] retrieve_external_web: Filtered to {len(results)} rental-related results "
           f"(rental_shops={rental_shop_count}, community={community_count}) from {len(all_results)} total")
+    
+    # 샘플 결과 출력 (디버깅용)
+    if results:
+        rental_shop_samples = [r for r in results if r.get("is_rental_shop")][:2]
+        community_samples = [r for r in results if r.get("is_community")][:2]
+        other_samples = [r for r in results if not r.get("is_rental_shop") and not r.get("is_community")][:2]
+        
+        if rental_shop_samples:
+            print(f"  ↳ Rental Shop samples:")
+            for i, r in enumerate(rental_shop_samples, 1):
+                print(f"    [{i}] {r.get('url', '')[:80]}... (score={r.get('score', 0):.2f})")
+        if community_samples:
+            print(f"  ↳ Community samples:")
+            for i, r in enumerate(community_samples, 1):
+                print(f"    [{i}] {r.get('url', '')[:80]}... (score={r.get('score', 0):.2f})")
+        if other_samples:
+            print(f"  ↳ Other rental samples:")
+            for i, r in enumerate(other_samples, 1):
+                print(f"    [{i}] {r.get('url', '')[:80]}... (score={r.get('score', 0):.2f})")
+    
     return results
 
 # 중고가 검색 툴
@@ -287,10 +333,35 @@ def merge_evidence(internal: List[Dict], web: List[Dict], top_k: int = 8) -> Lis
     
     rental_shop_count = len([d for d in picked if d.get("is_rental_shop")])
     community_count = len([d for d in picked if d.get("is_community")])
+    internal_count = len([d for d in picked if d.get("source") == "internal"])
+    other_web_count = len([d for d in picked if d.get("source") == "web"]) - rental_shop_count - community_count
+    
     print(f"[RAG] merge_evidence: Selected {len(picked)} items "
-          f"({len([d for d in picked if d.get('source') == 'internal'])} internal, "
-          f"{rental_shop_count} rental_shops, {community_count} community, "
-          f"{len([d for d in picked if d.get('source') == 'web']) - rental_shop_count - community_count} other web)")
+          f"({internal_count} internal, {rental_shop_count} rental_shops, {community_count} community, {other_web_count} other web)")
+    
+    # 샘플 결과 출력 (디버깅용)
+    if picked:
+        internal_samples = [d for d in picked if d.get("source") == "internal"][:2]
+        rental_shop_samples = [d for d in picked if d.get("is_rental_shop")][:2]
+        community_samples = [d for d in picked if d.get("is_community")][:2]
+        
+        if internal_samples:
+            print(f"  ↳ Internal samples:")
+            for i, d in enumerate(internal_samples, 1):
+                title = d.get("title", "No Title")[:50]
+                price = d.get("price", "N/A")
+                print(f"    [{i}] {title}... (price={price}, score={d.get('score', 0):.2f})")
+        if rental_shop_samples:
+            print(f"  ↳ Rental Shop samples:")
+            for i, d in enumerate(rental_shop_samples, 1):
+                url = d.get("url", "")[:80]
+                print(f"    [{i}] {url}... (score={d.get('score', 0):.2f})")
+        if community_samples:
+            print(f"  ↳ Community samples:")
+            for i, d in enumerate(community_samples, 1):
+                url = d.get("url", "")[:80]
+                print(f"    [{i}] {url}... (score={d.get('score', 0):.2f})")
+    
     return picked[:top_k]
 
 async def retrieve_dispute_cases(query: str, top_k=8) -> List[Dict[str, Any]]:
