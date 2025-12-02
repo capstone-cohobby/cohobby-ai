@@ -82,6 +82,17 @@ class ChromaHybridIndex:
             score = base + 0.05 * sim
             m = dict(meta)
             m["score"] = score
+            # [중요] 문서 텍스트를 content/snippet 필드로 추가 (메타데이터에 없을 경우 대비)
+            # 메타데이터에 snippet이 없으면 doc 텍스트를 사용
+            if "snippet" not in m and "content" not in m:
+                m["content"] = doc
+                m["snippet"] = doc
+            # 메타데이터에 snippet은 있지만 content가 없으면 snippet을 content로도 사용
+            elif "snippet" in m and "content" not in m:
+                m["content"] = m.get("snippet", doc)
+            # 메타데이터에 content는 있지만 snippet이 없으면 content를 snippet으로도 사용
+            elif "content" in m and "snippet" not in m:
+                m["snippet"] = m.get("content", doc)
             out.append(m)
         out.sort(key=lambda x: x["score"], reverse=True)
         return out

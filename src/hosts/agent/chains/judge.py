@@ -604,11 +604,8 @@ chain_deposit = (
     | create_pydantic_output_parser(DepositDecision, "Deposit")
 )
 
-# 3. Rules 체인 (수정 - dispute_evidence_str 주입)
-prompt_rules = ChatPromptTemplate.from_messages([
-    ("system", SYSTEM_PROMPT_RULES), 
-    ("human", "{user_json}")
-])
+# 3. Rules 체인 (수정 - dispute_evidence_str 주입 from_template을 사용하여 {user_json}과 {dispute_evidence_str} 변수를 모두 지원
+prompt_rules = ChatPromptTemplate.from_template(SYSTEM_PROMPT_RULES)
 
 chain_rules = (
     RunnableLambda(_prepare_rules_input) # [신규] Rules 전용 포매터
