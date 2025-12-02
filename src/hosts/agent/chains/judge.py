@@ -235,63 +235,15 @@ def _format_evidence_list_to_string(evidence_list: List[Dict[str, Any]]) -> Dict
     return {"source": "\n\n".join(formatted_summaries)}
 
 def _prepare_price_input(ai: AgentInput) -> Dict[str, str]:
-    """[Price] 가격 결정 체인용 입력: User Info + Analyst Report + Raw Evidence (대여 시장만)"""
-    # 1. 사용자 입력 (상품명, 상태 등) - 불필요한 evidence 제외
+    """[Price] 가격 결정 체인용 입력: User Info만 (RAG 증거 제외)"""
+    # 1. 사용자 입력 (상품명, 상태 등) - RAG 증거 제외
     user_data = ai.model_dump_json(exclude={"evidence", "used_evidence", "dispute_evidence", "rag_analysis_report", "rag_summary"})
     
-    # 2. RAG 분석가 리포트
-    report = ai.rag_analysis_report or {}
-    if isinstance(report, dict):
-        report_str = json.dumps(report, ensure_ascii=False, indent=2)
-    else:
-        report_str = str(report)
-        
-    # 3. 원본 증거 (대여 시장만 - used_evidence 제외 확인 및 필터링)
-    # evidence 리스트를 문자열로 변환
-    ev_list = ai.evidence or []
-    
-    # [중요] used_evidence가 섞여 있는지 확인하고 제거
-    used_list = getattr(ai, "used_evidence", None) or []
-    if used_list and ev_list:
-        # used_evidence의 URL/ID를 수집하여 evidence에서 제외
-        used_urls = {doc.get("url", "") for doc in used_list if doc.get("url")}
-        used_ids = {doc.get("id", "") for doc in used_list if doc.get("id")}
-        used_titles = {doc.get("title", "") for doc in used_list if doc.get("title")}
-        
-        # evidence에서 used_evidence와 겹치는 항목 제거
-        filtered_ev_list = []
-        removed_count = 0
-        for doc in ev_list:
-            doc_url = doc.get("url", "")
-            doc_id = doc.get("id", "")
-            doc_title = doc.get("title", "")
-            
-            # used_evidence와 겹치지 않는 경우만 포함
-            if (doc_url not in used_urls and 
-                doc_id not in used_ids and 
-                doc_title not in used_titles):
-                filtered_ev_list.append(doc)
-            else:
-                removed_count += 1
-        
-        if removed_count > 0:
-            print(f"[Chain] Price Input: Removed {removed_count} items from evidence that overlap with used_evidence")
-            ev_list = filtered_ev_list
-    
-    evidence_str = _format_evidence_list_to_string(ev_list).get("source")
-    
     # [검증] Price 체인에 전달되는 데이터 확인
-    print(f"[Chain] Price Input: evidence count={len(ev_list)}, used_evidence count={len(used_list)}, report exists={bool(report)}")
-    if ev_list:
-        print(f"[Chain] Price Input: First evidence sample - {str(ev_list[0])[:100]}...")
-        # evidence의 source 확인 (대여 시장만 있어야 함)
-        ev_sources = {doc.get("source", "unknown") for doc in ev_list}
-        print(f"[Chain] Price Input: Evidence sources: {ev_sources}")
+    print(f"[Chain] Price Input: RAG 증거 없이 사용자 정보만 전달 (RAG-free mode)")
 
     return {
-        "user_json": user_data,
-        "rag_analysis_report": report_str, # 프롬프트의 {{rag_analysis_report}} 와 매칭
-        "evidence_str": evidence_str       # 원본 증거
+        "user_json": user_data
     }
 
 # [신규 Helper] Deposit 체인용 입력 포매터

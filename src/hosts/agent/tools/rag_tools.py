@@ -39,8 +39,7 @@ async def retrieve_internal(query: str, top_k=10) -> List[Dict[str, Any]]:
         # 유사도가 높은(0.7) 문서는 0.7 * 1.5 * 2.0 = 2.1이 되어 웹 검색(최대 1.0)을 압도
         # 유사도가 낮은(0.2) 문서는 0.2 (Boost 없음) 그대로 유지 -> 웹 검색에 밀림
         if doc.get("price"):
-            s *= 2.0
-        
+            s *= 2.0   
         return s
 
     # listing_id 기준 dedupe
