@@ -423,10 +423,9 @@ async def retrieve_dispute_cases_node(state: GraphState) -> GraphState:
 
 # --- LangGraph 엣지(Edge) / 게이트(Gate) 정의 ---
 def gate_after_cache(state: GraphState) -> str:
-    """캐시 히트 여부 분기"""
-    if state.get("cache_hit"):
-        return "finalize_parallel"
-    return "retrieve_all"  # 캐시 미스 시 RAG 수행
+    """캐시 히트 여부 분기 (RAG 검색 건너뛰기)"""
+    # RAG 검색 없이 바로 최종 판단으로 이동
+    return "finalize_parallel"
 
 # 가격 결정 후 종료 (Fallback 제거 - RAG 없이 1번만 실행)
 def gate_after_price(state: GraphState) -> str:
@@ -461,10 +460,9 @@ graph.add_node("derive_rental_price_node", derive_rental_price_node)
 graph.set_entry_point("enrich_input")
 graph.add_edge("enrich_input", "check_verdict_cache")
 
-# 1. 캐시 분기 
+# 1. 캐시 분기 (RAG 검색 건너뛰기 - 항상 finalize_parallel로)
 graph.add_conditional_edges("check_verdict_cache", gate_after_cache, {
-    "finalize_parallel": "finalize_parallel", # 캐시 히트 시
-    "retrieve_all": "retrieve_all"  # 캐시 미스 시
+    "finalize_parallel": "finalize_parallel"  # RAG 검색 없이 바로 최종 판단
 })
 
 # 2.  RAG 
