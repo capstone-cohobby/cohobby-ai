@@ -25,26 +25,27 @@ async def retrieve_internal(query: str, top_k=10) -> List[Dict[str, Any]]:
         # 1. 기본 벡터 유사도 (0.0 ~ 1.0 사이, 높을수록 관련성 높음)
         base_sim = float(doc.get("score", 0.0))
         
-        # [Safety] 유사도가 너무 낮으면(예: 0.3 미만) 아예 가산점을 주지 않음 (샤이니 응원봉 방지)
+        # [Safety] 유사도가 너무 낮으면(예: 0.25 미만) 아예 가산점을 주지 않음 (샤이니 응원봉 방지)
         if base_sim < 0.25:
             return base_sim
             
-        s = base_sim
+        # [중요] 내부 데이터가 웹에 밀리지 않도록 기본 점수를 2.0배로 시작
+        # 이렇게 하면 내부 문서 상한이 3~4점대까지 올라가서 웹보다 확실히 우위를 가짐
+        s = base_sim * 2.0  # 기본 2배로 시작 (웹 대비 확실한 우위)
         
         title = (doc.get("title") or "").lower()
         snip  = (doc.get("snippet") or doc.get("content") or "").lower()
 
         # 2. 관련성이 확보된 문서에 한해 가중치 '곱하기' 적용
         
-        # (1) 대여/렌탈 의도 부합 시 1.5배
+        # (1) 대여/렌탈 의도 부합 시 1.3배 (1.5 → 1.3으로 조정, 이미 2.0배 했으므로)
         if ("대여" in title) or ("렌탈" in title) or ("대여" in snip) or ("렌탈" in snip):
-            s *= 1.5 
+            s *= 1.3 
         
-        # (2) 가격 정보 존재 시 2.0배 (가장 중요)
-        # 유사도가 높은(0.7) 문서는 0.7 * 1.5 * 2.0 = 2.1이 되어 웹 검색(최대 1.0)을 압도
-        # 유사도가 낮은(0.2) 문서는 0.2 (Boost 없음) 그대로 유지 -> 웹 검색에 밀림
+        # (2) 가격 정보 존재 시 1.5배 (2.0 → 1.5로 조정, 이미 2.0배 했으므로)
+        # 이제 내부 문서 최고점: 0.7 * 2.0 * 1.3 * 1.5 = 2.73 (웹보다 확실히 높음)
         if doc.get("price"):
-            s *= 2.0
+            s *= 1.5
         
         return s
 
@@ -274,13 +275,14 @@ def merge_evidence(internal: List[Dict], web: List[Dict], top_k: int = 8) -> Lis
     구매/판매 web 결과는 아예 price evidence에 포함되지 않습니다.
     """
     # 1) 내부 데이터 정렬 (가격 정보 우선)
+    # [중요] 내부 데이터가 웹에 절대 밀리지 않도록 보정폭을 크게 확대
     def _internal_score(doc):
         base_score = float(doc.get("score") or 0.5)
         price = doc.get("price")
         if price:
-            base_score += 0.5  # 내부 가격 정보가 있으면 +0.5 보정
+            base_score += 1.0  # 내부 가격 정보가 있으면 +1.0 보정 (기존 +0.5 → +1.0)
         else:
-            base_score += 0.3  # 내부 데이터는 기본적으로 +0.3 보정
+            base_score += 0.6  # 내부 데이터는 기본적으로 +0.6 보정 (기존 +0.3 → +0.6)
         return base_score
     
     internal_sorted = sorted(internal or [], key=_internal_score, reverse=True)
@@ -322,26 +324,26 @@ def merge_evidence(internal: List[Dict], web: List[Dict], top_k: int = 8) -> Lis
             seen.add(key)
         uniq.append(d)
     
-    # 4) 내부 데이터를 더 우선시 (내부 N개는 무조건 먼저 채우고, 남는 슬롯만 web으로)
-    N_INTERNAL_PRIORITY = 5  # 내부 데이터 최대 5개 우선 보장
-    picked = internal_sorted[:N_INTERNAL_PRIORITY]
-    picked_keys = {d.get("id") or d.get("listing_id") or d.get("title") for d in picked if d.get("id") or d.get("listing_id") or d.get("title")}
+    # 4) 내부 데이터를 더 우선시 (내부 데이터가 존재할 때는 절대 웹에 밀리지 않도록)
+    # [중요] 내부 데이터는 top_k보다 많더라도 우선 삽입 (웹이 개입하지 못하게)
+    picked = []
+    picked_keys = set()
     
-    # 남는 슬롯을 web으로 채우기 (대여샵 > 커뮤니티 > 기타 순)
+    # 내부 데이터를 최대한 많이 우선 삽입 (top_k까지 전부 내부로 채울 수 있으면 채움)
+    for d in internal_sorted:
+        if len(picked) >= top_k:
+            break
+        key = d.get("id") or d.get("listing_id") or d.get("title")
+        if key and key in picked_keys:
+            continue
+        picked.append(d)
+        if key:
+            picked_keys.add(key)
+    
+    # 내부 데이터가 부족하면 남는 슬롯만 web으로 채우기 (커뮤니티 > 대여샵 > 기타 순)
     remain = top_k - len(picked)
     if remain > 0:
         for d in rental_web_sorted:
-            if len(picked) >= top_k:
-                break
-            key = d.get("id") or d.get("listing_id") or d.get("title")
-            if key and key not in picked_keys:
-                picked.append(d)
-                if key:
-                    picked_keys.add(key)
-    
-    # 내부 데이터가 부족하면 나머지 내부 데이터도 추가
-    if len(picked) < top_k:
-        for d in internal_sorted[N_INTERNAL_PRIORITY:]:
             if len(picked) >= top_k:
                 break
             key = d.get("id") or d.get("listing_id") or d.get("title")
