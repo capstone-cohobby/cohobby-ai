@@ -228,7 +228,7 @@ async def finalize_parallel(state: GraphState) -> GraphState:
         
         # 각 체인을 병렬로 실행하되, 각각을 try-catch로 감싸서 에러 격리
         from .chains.judge import chain_price, chain_deposit, chain_rules
-        from .schemas import DepositDecision, RulesDecision
+        from .schemas import DepositDecision, RulesDecision, PriceDecision, PriceEstimate
         
         async def run_price_chain():
             try:
@@ -279,7 +279,19 @@ async def finalize_parallel(state: GraphState) -> GraphState:
             set_verdict(state["signature"], price_result)
             print("[Graph] Finalize Parallel: Price OK")
         else:
-            print("[Graph] Finalize Parallel: WARNING - price_decision is None")
+            print("[Graph] Finalize Parallel: ERROR - price_decision is None!")
+            # 기본값 제공
+            state["price_decision"] = PriceDecision(
+                decision="uncertain",
+                confidence=0.5,
+                reasoning="가격 산정 중 오류가 발생했습니다.",
+                price=PriceEstimate(
+                    point=0,
+                    low=0,
+                    high=0,
+                    basis="오류로 인한 기본값"
+                )
+            )
         
         if deposit_result:
             state["deposit_decision"] = deposit_result
@@ -308,7 +320,19 @@ async def finalize_parallel(state: GraphState) -> GraphState:
         state["error"] = f"finalize_error: {e}"
         
         # 에러 발생 시에도 기본값 제공
-        from .schemas import DepositDecision, RulesDecision
+        from .schemas import DepositDecision, RulesDecision, PriceDecision, PriceEstimate
+        if "price_decision" not in state or state.get("price_decision") is None:
+            state["price_decision"] = PriceDecision(
+                decision="uncertain",
+                confidence=0.5,
+                reasoning=f"가격 산정 중 오류 발생: {str(e)[:200]}",
+                price=PriceEstimate(
+                    point=0,
+                    low=0,
+                    high=0,
+                    basis="오류로 인한 기본값"
+                )
+            )
         if "deposit_decision" not in state or state.get("deposit_decision") is None:
             state["deposit_decision"] = DepositDecision(
                 deposit_amount=0,
