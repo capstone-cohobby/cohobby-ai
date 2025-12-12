@@ -1,7 +1,7 @@
 # graph.py
 import json
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from langgraph.graph import StateGraph, END
 from .chains.adapters import normalize_doc
@@ -46,6 +46,7 @@ def check_verdict_cache(state: GraphState) -> GraphState:
     return state
 
 async def _build_rag_query(state: GraphState) -> str:
+    """기본 대여 검색 쿼리 생성"""
     inp = state["inp"]
     name = (inp.get("name") or "").strip()
     cat = (inp.get("category") or "").strip()
@@ -61,6 +62,42 @@ async def _build_rag_query(state: GraphState) -> str:
     
     return q
 
+async def _build_community_rental_queries(state: GraphState) -> List[str]:
+    """커뮤니티 대여글 검색용 쿼리 세트 생성 (당근, 중고나라, 네이버 카페)"""
+    inp = state["inp"]
+    name = (inp.get("name") or "").strip()
+    cat = (inp.get("category") or "").strip()
+    base = f"{name} {cat}".strip()
+    
+    # 커뮤니티 대여글 검색 쿼리 세트 (병렬 검색용)
+    queries = [
+        f"{base} 대여 site:cafe.naver.com",
+        f"{base} 대여 중고나라",
+        f"{base} 대여 당근",
+        f"{base} 하루 대여",
+        f"{cat} 대여 후기" if cat else f"{name} 대여 후기"
+    ]
+    
+    print(f"[Graph] Community Rental Queries = {queries}")
+    return queries
+
+async def _build_rental_shop_queries(state: GraphState) -> List[str]:
+    """대여샵(업체) 가격 검색용 쿼리 세트 생성"""
+    inp = state["inp"]
+    name = (inp.get("name") or "").strip()
+    cat = (inp.get("category") or "").strip()
+    base = f"{name} {cat}".strip()
+    
+    # 대여샵 가격 검색 쿼리
+    queries = [
+        f"{base} 렌탈 업체 가격",
+        f"{base} 렌탈 요금",
+        f"{cat} 렌탈 가격 하루" if cat else f"{name} 렌탈 가격 하루"
+    ]
+    
+    print(f"[Graph] Rental Shop Queries = {queries}")
+    return queries
+
 async def _build_sale_query(state: GraphState) -> str:
     """'중고/판매' 쿼리 생성기"""
     inp = state["inp"]
@@ -70,11 +107,13 @@ async def _build_sale_query(state: GraphState) -> str:
     return q
 
 async def _build_dispute_query(state: GraphState) -> str:
-    """분쟁 조정 사례 쿼리 생성기"""
+    """분쟁 조정 사례 쿼리 생성기 (강화: 비슷한 카테고리 분쟁도 검색)"""
     inp = state["inp"]
     name = (inp.get("name") or "").strip()
     category = (inp.get("category") or "").strip()
-    q = f"{name} {category} 분쟁 파손 하자".strip()
+    # 쿼리를 더 강화하여 비슷한 카테고리 분쟁도 검색되도록 함
+    # 분쟁 관련 키워드를 더 추가하고, 카테고리 없이도 검색 가능하도록 함
+    q = f"{name} {category} 분쟁 파손 하자 손상 배상 반납 연체".strip()
     print(f"[Graph] Dispute RAG Query = {q}")  # 쿼리 로깅
     return q
 
@@ -92,11 +131,17 @@ async def retrieve_all_node(state: GraphState) -> GraphState:
     q_price = await _build_rag_query(state)      # 예: "맥북 프로 대여"
     q_sale = await _build_sale_query(state)      # 예: "맥북 프로" (중고가 검색용)
     q_dispute = await _build_dispute_query(state) # 예: "맥북 프로 디지털가전"
+    
+    # [신규] 커뮤니티 대여글 + 대여샵 가격 쿼리 생성
+    community_queries = await _build_community_rental_queries(state)
+    rental_shop_queries = await _build_rental_shop_queries(state)
+    # 모든 웹 검색 쿼리 합치기
+    all_web_queries = [q_price] + community_queries + rental_shop_queries
 
     # 2. 4개 채널 병렬 실행
-    # (내부 DB, 외부 웹, 중고가, 분쟁 DB)
+    # (내부 DB, 외부 웹(3단계 구조), 중고가, 분쟁 DB)
     task_internal = retrieve_internal(q_price)
-    task_web = retrieve_external_web(q_price)
+    task_web = retrieve_external_web(queries=all_web_queries)  # [신규] 여러 쿼리 병렬 검색
     task_used = retrieve_used_price_web(q_sale)  # [신규] 중고가 검색 추가
     task_dispute = retrieve_dispute_cases(q_dispute)
     
@@ -121,6 +166,13 @@ async def retrieve_all_node(state: GraphState) -> GraphState:
     # (1) 정규화 (Internal, Web 문서를 동일한 스키마로 변환)
     norm_internal = [normalize_doc(d, "internal") for d in (internal_docs or [])]
     norm_web = [normalize_doc(d, "web") for d in (web_docs or [])]
+    
+    # [검증] 정규화된 내부 데이터 확인
+    print(f"[Graph] Normalized: {len(norm_internal)} internal, {len(norm_web)} web")
+    if norm_internal:
+        sample = norm_internal[0]
+        print(f"[Graph] Normalized internal sample: title='{sample.get('title', 'N/A')[:50]}', price={sample.get('price', 'N/A')}, "
+              f"has_snippet={bool(sample.get('snippet'))}, has_content={bool(sample.get('content'))}, source={sample.get('source')}")
     
     # (2) 병합 (중복 제거 및 점수 기반 정렬)
     # merge_evidence 함수 내부에서 중복 제거나 정렬을 수행한다고 가정
@@ -276,10 +328,14 @@ async def finalize_parallel(state: GraphState) -> GraphState:
         # 결과 저장
         if price_result:
             state["price_decision"] = price_result
-            set_verdict(state["signature"], price_result)
-            print("[Graph] Finalize Parallel: Price OK")
+            # [중요] 'reasonable'일 때만 캐시 저장 (fallback으로 갈 수 있는 경우는 저장하지 않음)
+            if price_result.decision == "reasonable":
+                set_verdict(state["signature"], price_result)
+                print(f"[Graph] Finalize Parallel: Price OK - decision={price_result.decision}, confidence={price_result.confidence}")
+            else:
+                print(f"[Graph] Finalize Parallel: Price OK but decision={price_result.decision}, confidence={price_result.confidence} - Will trigger fallback")
         else:
-            print("[Graph] Finalize Parallel: WARNING - price_decision is None")
+            print("[Graph] Finalize Parallel: WARNING - price_decision is None - Will trigger fallback")
         
         if deposit_result:
             state["deposit_decision"] = deposit_result
@@ -430,19 +486,72 @@ def gate_after_cache(state: GraphState) -> str:
 
 # [신규] 가격 결정 후 Fallback 여부 분기
 def gate_after_price(state: GraphState) -> str:
-    """가격 결정의 신뢰도에 따라 Fallback 실행 여부 결정"""
-    price_decision = state.get("price_decision")
+    """가격 결정의 신뢰도에 따라 Fallback 실행 여부 결정
     
-    if price_decision and price_decision.decision == "reasonable":
-        print("[Graph] Gate: Price is 'reasonable'. Caching and Ending.")
-        # [신규] 'reasonable'일 때만 캐시 저장
-        set_verdict(state["signature"], price_decision)
-        print("[Cache] SET OK (Reasonable):", state["signature"])
-        return "END"
-    else:
-        decision_str = price_decision.decision if price_decision else "None"
-        print(f"[Graph] Gate: Price is '{decision_str}'. Triggering Fallback Sale RAG.")
+    [개선 로직]
+    1. evidence 안에 '대여 근거'가 있는지 체크
+    2. 대여 evidence가 있으면 웬만하면 ROI로 보내지 않고 RAG 결과를 신뢰
+    3. 대여 evidence가 아예 없을 때만 ROI fallback
+    
+    - decision == "reasonable"이고 confidence >= 0.6: END (캐시 저장)
+    - decision == "reasonable"이지만 confidence < 0.6이어도, 대여 evidence가 있으면 END
+    - 대여 evidence가 없고 decision이 "uncertain"/"unreasonable"이거나 confidence < 0.6: Fallback (ROI 방식)
+    """
+    price_decision = state.get("price_decision")
+    evidence = state.get("evidence", [])
+    
+    # 1. evidence 안에 '대여 근거'가 있는지 체크
+    has_rental_evidence = False
+    if evidence:
+        for d in evidence:
+            # 내부 데이터 (source == "internal")는 대여 데이터로 간주
+            if d.get("source") == "internal":
+                has_rental_evidence = True
+                break
+            # 웹 데이터 중 커뮤니티 대여글 또는 대여샵
+            if d.get("is_community") or d.get("is_rental_shop") or d.get("is_rental"):
+                has_rental_evidence = True
+                break
+    
+    # price_decision이 없으면
+    if not price_decision:
+        # evidence도 없고 price도 없으면 어쩔 수 없이 ROI
+        if not has_rental_evidence:
+            print("[Graph] Gate: price_decision is None and no rental evidence. Triggering Fallback (ROI Deriver).")
+            return "fallback_sale_search"
+        else:
+            # 대여 evidence는 있는데 price_decision이 없는 경우는 이상하지만, 일단 END 처리
+            print("[Graph] Gate: price_decision is None but rental evidence exists. This should not happen, but ending anyway.")
+            return "END"
+    
+    # price_decision이 있더라도 price 객체가 None이거나 point가 None이면 fallback
+    price_obj = price_decision.price if price_decision else None
+    if not price_obj or price_obj.point is None:
+        print(f"[Graph] Gate: price_decision exists but price is None or point is None. Triggering Fallback (ROI Deriver).")
         return "fallback_sale_search"
+    
+    decision = price_decision.decision
+    confidence = price_decision.confidence
+    
+    # 2. RAG가 reasonable이면 그대로 끝
+    if decision == "reasonable":
+        # confidence 낮아도, 대여 evidence 있으면 그냥 신뢰하고 종료
+        if confidence >= 0.6 or has_rental_evidence:
+            print(f"[Graph] Gate: Price is 'reasonable' (confidence={confidence}, has_rental_evidence={has_rental_evidence}). Caching and Ending.")
+            set_verdict(state["signature"], price_decision)
+            print("[Cache] SET OK (Reasonable):", state["signature"])
+            return "END"
+    
+    # 3. 대여 evidence가 아예 없을 때만 ROI fallback
+    if not has_rental_evidence:
+        print(f"[Graph] Gate: No rental evidence found. decision='{decision}', confidence={confidence}. Triggering Fallback (ROI Deriver).")
+        return "fallback_sale_search"
+    
+    # 4. 대여 evidence는 있는데 판단이 애매한 경우:
+    #    → RAG 결과를 그냥 그대로 쓰거나, confidence를 강제로 올려서 END 처리
+    print(f"[Graph] Gate: Rental evidence exists but decision='{decision}', confidence={confidence}. Using RAG result anyway (not sending to ROI).")
+    set_verdict(state["signature"], price_decision)
+    return "END"
 # --- 그래프 배선 ---
 
 graph = StateGraph(GraphState)
